@@ -42,14 +42,58 @@ const TaskName = styled("span")({
   color: HUD.textDim,
 });
 
-const TimeCode = styled("div")({
+const TimeBlock = styled("div")({
   marginLeft: "auto",
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+});
+
+const PlayButton = styled("button")({
+  display: "grid",
+  placeItems: "center",
+  width: 28,
+  height: 28,
+  padding: 0,
+  border: "none",
+  borderRadius: 4,
+  background: "transparent",
+  color: HUD.cyan,
+  cursor: "pointer",
+  transition: "background-color 140ms ease, color 140ms ease",
+  "&:hover": {
+    backgroundColor: "rgba(63, 178, 255, 0.12)",
+  },
+  "&:focus-visible": {
+    outline: `1px solid ${HUD.cyan}`,
+    outlineOffset: 1,
+  },
+});
+
+const TimeCode = styled("div")({
   fontFamily: '"Roboto Mono", "Consolas", monospace',
   fontSize: 13,
   fontVariantNumeric: "tabular-nums",
   color: HUD.cyan,
   letterSpacing: 1,
 });
+
+function PlayIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+      <path d="M3.2 1.6v8.8L10 6z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+      <rect x="2.6" y="1.8" width="2.4" height="8.4" rx="0.6" />
+      <rect x="7" y="1.8" width="2.4" height="8.4" rx="0.6" />
+    </svg>
+  );
+}
 
 /** 第二行：左右手两张标注卡 */
 const CardsRow = styled("div")({
@@ -135,7 +179,7 @@ function pickActive(list: ActionAnnotation[], t: number): ActionAnnotation | und
 
 /** 底部标注条：上=标题行（含时间码），下=左右手两张动作标注卡 */
 export default function AnnotationBar() {
-  const { annotations, currentTime, duration, seek, setPlaying } = usePlayback();
+  const { annotations, currentTime, duration, seek, isPlaying, setPlaying } = usePlayback();
 
   const leftList = annotations.filter((a) => a.hand === "left");
   const rightList = annotations.filter((a) => a.hand === "right");
@@ -183,9 +227,19 @@ export default function AnnotationBar() {
       <HeaderRow>
         <HeaderTitle>动作标注</HeaderTitle>
         <TaskName>清洗黄色杯子</TaskName>
-        <TimeCode>
-          {formatAnnotationTime(currentTime)} / {formatAnnotationTime(duration)}
-        </TimeCode>
+        <TimeBlock>
+          <PlayButton
+            type="button"
+            aria-label={isPlaying ? "暂停" : "播放"}
+            title={isPlaying ? "暂停" : "播放"}
+            onClick={() => setPlaying(!isPlaying)}
+          >
+            {isPlaying ? <PauseIcon /> : <PlayIcon />}
+          </PlayButton>
+          <TimeCode>
+            {formatAnnotationTime(currentTime)} / {formatAnnotationTime(duration)}
+          </TimeCode>
+        </TimeBlock>
       </HeaderRow>
 
       <CardsRow>
