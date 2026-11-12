@@ -1,8 +1,0 @@
-services:
-  web:
-    build: .
-    image: sheyuan-ui:latest
-    container_name: sheyuan-ui
-    ports:
-      - "8080:80"
-    restart: unless-stopped
