@@ -580,6 +580,8 @@ export default function TrajectoryScene({
       spriteMats.forEach((m) => m.dispose());
       dotTex.dispose();
       softTex.dispose();
+      // dispose 只释放资源，上下文要显式丢掉，否则换配色几次就撞上浏览器上限
+      renderer.forceContextLoss();
       renderer.dispose();
       renderer.domElement.remove();
       renderRef.current = () => {};
