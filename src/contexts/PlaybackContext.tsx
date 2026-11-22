@@ -23,6 +23,19 @@ export interface ActionAnnotation {
   objects: string;
 }
 
+/** 作业规范评分：运行中为「暂评」，结束为「本次评分」，数据不足时为「--」 */
+export type ScoreStatus = "provisional" | "final" | "insufficient";
+
+export interface SessionScore {
+  value: number | null;
+  status: ScoreStatus;
+  rule_version: string;
+  model_version: string;
+  /** 有效可评估事件数（评分分母） */
+  effective_event_count: number;
+  coverage_pct: number | null;
+}
+
 export const DURATION = 60;
 
 const COMMIT_INTERVAL_MS = 1000 / 30;
@@ -42,6 +55,16 @@ const INITIAL_ANNOTATIONS: ActionAnnotation[] = [
   { id: "a12", start: 55.5, end: 60.0, hand: "right", title: "双手归位", objects: "无", text: "双手回到初始姿态，等待下一轮清洗指令。" },
 ];
 
+/** 界面占位分数，口径见设计说明 §5.1 / §7.5：不是 AI 置信度 */
+const INITIAL_SCORE: SessionScore = {
+  value: 92.0,
+  status: "provisional",
+  rule_version: "r1",
+  model_version: "m1.1",
+  effective_event_count: 48,
+  coverage_pct: 87,
+};
+
 export function formatAnnotationTime(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -56,6 +79,7 @@ interface PlaybackValue {
   isPlaying: boolean;
   setPlaying: (playing: boolean) => void;
   annotations: ActionAnnotation[];
+  score: SessionScore;
 }
 
 const PlaybackContext = createContext<PlaybackValue | null>(null);
@@ -114,6 +138,7 @@ export function PlaybackProvider({ children }: { children: ReactNode }) {
     isPlaying,
     setPlaying,
     annotations,
+    score: INITIAL_SCORE,
   };
 
   return <PlaybackContext.Provider value={value}>{children}</PlaybackContext.Provider>;

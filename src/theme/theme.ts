@@ -9,6 +9,7 @@ export const HUD = {
   panel: "#060d1b",
   panelSoft: "#0a1526",
   line: "rgba(72, 148, 235, 0.22)",
+  lineSoft: "rgba(126, 162, 205, 0.10)",
   lineStrong: "rgba(96, 176, 255, 0.55)",
   cyan: "#3fb2ff",
   cyanDim: "#1c6ea8",
@@ -46,7 +47,8 @@ const theme = createTheme({
   },
   typography: {
     fontSize: 14,
-    fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontFamily:
+      '"Inter", "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Roboto", "Helvetica", "Arial", sans-serif',
     h1: { fontWeight: 400, letterSpacing: "-2.16px" },
     h2: { fontWeight: 400, letterSpacing: "-0.72px" },
     h3: { fontWeight: 400, letterSpacing: "-0.325px" },
@@ -67,7 +69,21 @@ const theme = createTheme({
         body: {
           backgroundColor: HUD.deep,
           scrollbarWidth: "thin",
+          scrollbarColor: "rgba(126, 162, 205, 0.22) transparent",
         },
+        "*::-webkit-scrollbar": { width: 9, height: 9 },
+        "*::-webkit-scrollbar-track": { background: "transparent" },
+        "*::-webkit-scrollbar-thumb": {
+          backgroundColor: "rgba(126, 162, 205, 0.16)",
+          borderRadius: 8,
+          border: "3px solid transparent",
+          backgroundClip: "content-box",
+        },
+        "*::-webkit-scrollbar-thumb:hover": {
+          backgroundColor: "rgba(126, 162, 205, 0.30)",
+          backgroundClip: "content-box",
+        },
+        "*::-webkit-scrollbar-corner": { background: "transparent" },
         // 键盘操作时给一圈细描边；鼠标点不显示，不影响观感
         "*:focus-visible": {
           outline: `1px solid ${HUD.lineStrong}`,
@@ -75,7 +91,7 @@ const theme = createTheme({
           borderRadius: 2,
         },
         "::selection": {
-          backgroundColor: "rgba(63, 178, 255, 0.26)",
+          backgroundColor: "rgba(63, 178, 255, 0.22)",
           color: HUD.text,
         },
       },
@@ -93,9 +109,10 @@ const theme = createTheme({
         tooltip: {
           backgroundColor: HUD.panelSoft,
           border: `1px solid ${HUD.line}`,
-          borderRadius: 4,
+          borderRadius: 5,
           padding: "5px 9px",
-          fontSize: 12,
+          fontSize: 11.5,
+          letterSpacing: 0.2,
           color: HUD.text,
         },
       },
@@ -104,10 +121,10 @@ const theme = createTheme({
       styleOverrides: {
         paper: {
           backgroundColor: HUD.panelSoft,
-          border: `1px solid ${HUD.line}`,
-          borderRadius: 6,
+          border: `1px solid ${HUD.lineSoft}`,
+          borderRadius: 8,
           padding: "4px 0",
-          boxShadow: "0 14px 32px rgba(0, 0, 0, 0.55)",
+          boxShadow: "0 18px 44px rgba(0, 0, 0, 0.62)",
         },
       },
     },

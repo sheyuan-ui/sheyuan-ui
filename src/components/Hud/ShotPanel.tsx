@@ -43,6 +43,8 @@ interface ShotPanelProps {
   alt: string;
   className?: string;
   style?: React.CSSProperties;
+  /** 叠加在画面上的色彩处理，用于区分不同设备的演示画面 */
+  imageFilter?: string;
   onPictureDoubleClick?: () => void;
   /** 允许滚轮缩放（只在放大成单画面时打开） */
   wheelZoom?: boolean;
@@ -54,6 +56,7 @@ export default function ShotPanel({
   alt,
   className,
   style,
+  imageFilter,
   onPictureDoubleClick,
   wheelZoom = false,
   children,
@@ -153,6 +156,7 @@ export default function ShotPanel({
         $clickable={!!onPictureDoubleClick}
         style={{
           transform: `translate(${zoom.dx.toFixed(2)}px, ${zoom.dy.toFixed(2)}px) scale(${zoom.s.toFixed(3)})`,
+          filter: imageFilter,
         }}
         onDoubleClick={handleDoubleClick}
       />

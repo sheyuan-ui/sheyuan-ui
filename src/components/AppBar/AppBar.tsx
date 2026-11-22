@@ -2,9 +2,6 @@ import { Avatar, IconButton, Menu, MenuItem, Tooltip, Divider, Button } from "@m
 import { styled } from "@mui/material/styles";
 import { useState } from "react";
 import { HUD } from "../../theme/theme";
-import { usePlayback } from "../../contexts/PlaybackContext";
-import { generateTwoHands, type Pt } from "../../utils/handKeypoints";
-import { VIEW_MODES, type ViewMode } from "../Hud/viewModes";
 import { ChevronDownIcon, SettingsIcon } from "../icons";
 
 const AppBarContainer = styled("div")(({ theme }) => ({
@@ -15,8 +12,7 @@ const AppBarContainer = styled("div")(({ theme }) => ({
   color: theme.palette.appBar.text,
   userSelect: "none",
   borderBottom: `1px solid ${theme.palette.divider}`,
-  // 顶亮线 + 下投影：让顶栏像一块薄板，而不是一条纯色
-  boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 1px 12px rgba(0, 0, 0, 0.6)",
+  boxShadow: "0 6px 20px rgba(0, 0, 0, 0.32)",
 }));
 
 const ToolbarGrid = styled("div")({
@@ -26,7 +22,11 @@ const ToolbarGrid = styled("div")({
   gridTemplateAreas: `"start middle end"`,
   gridTemplateColumns: "1fr auto 1fr",
   alignItems: "center",
-  padding: "0 8px",
+  padding: "0 10px",
+  // 窄屏不再居中悬浮，避免与左侧导航互相遮挡
+  "@media (max-width: 760px)": {
+    gridTemplateColumns: "auto minmax(0, 1fr) auto",
+  },
 });
 
 const StartSection = styled("div")({
@@ -42,8 +42,14 @@ const MiddleSection = styled("div")({
   gridArea: "middle",
   justifySelf: "center",
   overflow: "hidden",
-  fontSize: 13,
+  fontSize: 12.5,
   fontWeight: 500,
+  letterSpacing: 0.2,
+  "& .prefix": { color: HUD.textDim, fontWeight: 400 },
+  // 窄屏只保留状态与台数，给左侧导航让位
+  "@media (max-width: 900px)": {
+    "& .prefix": { display: "none" },
+  },
 });
 
 const EndSection = styled("div")({
@@ -56,198 +62,135 @@ const EndSection = styled("div")({
   overflow: "hidden",
 });
 
-const LogoButton = styled(IconButton)({
-  padding: "4px 8px",
-  borderRadius: 0,
-  color: HUD.text,
-  transition: "background-color 140ms ease",
-  "&:hover": { backgroundColor: "rgba(63, 178, 255, 0.10)" },
-});
-
 const MenuBarButton = styled(Button)({
+  position: "relative",
   color: HUD.textDim,
   textTransform: "none",
-  fontSize: 13,
+  fontSize: 12.5,
   fontWeight: 500,
-  padding: "4px 10px",
-  borderRadius: 0,
+  letterSpacing: 0.2,
+  padding: "5px 10px",
+  borderRadius: 5,
   minWidth: 0,
   whiteSpace: "nowrap",
   flexShrink: 0,
-  transition: "color 140ms ease, background-color 140ms ease",
+  transition: "color 160ms ease, background-color 160ms ease",
   "&.is-active": {
-    color: HUD.cyan,
+    color: HUD.text,
     fontWeight: 600,
-    textShadow: "0 0 8px rgba(63, 178, 255, 0.32)",
   },
-  "&:hover": { backgroundColor: "rgba(63, 178, 255, 0.10)", color: HUD.text },
+  "&.is-active::after": {
+    content: '""',
+    position: "absolute",
+    left: 10,
+    right: 10,
+    bottom: 0,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: HUD.cyan,
+    opacity: 0.9,
+  },
+  "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.05)", color: HUD.text },
 });
 
-const DataSourceDisplay = styled("div")({
+const DataSourceDisplay = styled("button")({
   display: "flex",
   alignItems: "center",
   gap: 8,
-  cursor: "pointer",
+  padding: "3px 7px",
+  margin: "0 -7px",
+  border: "none",
+  borderRadius: 4,
+  background: "transparent",
   color: HUD.text,
+  font: "inherit",
+  fontWeight: 500,
+  cursor: "pointer",
   whiteSpace: "nowrap",
+  transition: "background-color 160ms ease",
+  "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.05)" },
+  "&:focus-visible": { outline: `1px solid ${HUD.lineStrong}` },
 });
 
 const StatusDot = styled("div")<{ status: "connected" | "disconnected" | "error" }>(({ status }) => ({
-  width: 8,
-  height: 8,
+  width: 7,
+  height: 7,
   borderRadius: "50%",
   backgroundColor:
-    status === "connected" ? HUD.ok : status === "error" ? HUD.danger : HUD.cyan,
-  boxShadow: `0 0 6px ${status === "connected" ? HUD.ok : status === "error" ? HUD.danger : HUD.cyan}`,
+    status === "connected" ? HUD.ok : status === "error" ? HUD.danger : HUD.textDim,
+  boxShadow:
+    status === "connected"
+      ? "0 0 5px rgba(95, 208, 138, 0.55)"
+      : status === "error"
+        ? "0 0 5px rgba(245, 73, 102, 0.55)"
+        : "none",
 }));
 
-/** 顶栏右侧的手部轨迹读数块；窗口变窄时逐级省略，避免整块被裁掉 */
-const TrajBlock = styled("div")<{ $color: string }>(({ $color }) => ({
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "2px 8px",
-  border: `1px solid ${HUD.line}`,
-  borderRadius: 4,
-  backgroundColor: "rgba(6, 13, 27, 0.6)",
-  whiteSpace: "nowrap",
-  flexShrink: 0,
-  fontSize: 11,
-  fontVariantNumeric: "tabular-nums",
-  "& > .hand": { color: $color, fontWeight: 600, letterSpacing: 1 },
-  "& > .val": {
-    fontFamily: '"Roboto Mono", "Consolas", monospace',
-    color: HUD.text,
-  },
-  "& > .vel": {
-    fontFamily: '"Roboto Mono", "Consolas", monospace',
-    color: HUD.textDim,
-  },
-  "@media (max-width: 1240px)": {
-    gap: 5,
-    padding: "2px 6px",
-    "& > .vel": { display: "none" },
-  },
-  "@media (max-width: 980px)": {
-    "& > .val": { display: "none" },
-  },
-}));
-
-const TrajDot = styled("span")<{ $color: string }>(({ $color }) => ({
-  width: 6,
-  height: 6,
+const DeviceDot = styled("i")({
+  width: 5,
+  height: 5,
   borderRadius: "50%",
-  backgroundColor: $color,
-  boxShadow: `0 0 6px ${$color}`,
-}));
+  backgroundColor: HUD.ok,
+  boxShadow: "0 0 4px rgba(95, 208, 138, 0.5)",
+  flexShrink: 0,
+});
 
-/** 右侧边栏开关：面板区高亮表示当前是展开态 */
-const SideButton = styled(IconButton, { shouldForwardProp: (prop) => prop !== "$on" })<{
-  $on: boolean;
-}>(({ $on }) => ({
-  padding: 5,
-  borderRadius: 0,
-  color: $on ? HUD.cyan : HUD.textDim,
-  transition: "color 140ms ease, background-color 140ms ease",
-  "&:hover": { backgroundColor: "rgba(63, 178, 255, 0.10)", color: HUD.cyan },
-}));
+const DeviceAlias = styled("span")({
+  minWidth: 0,
+  marginRight: "auto",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 10.5,
+  color: HUD.textDim,
+});
 
-function SidebarIcon({ on }: { on: boolean }) {
-  return (
-    <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
-      <rect
-        x="1.75"
-        y="2.75"
-        width="16.5"
-        height="14.5"
-        rx="1.5"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-      <path d="M12.5 2.75V17.25" stroke="currentColor" strokeWidth="1.5" />
-      <rect
-        x="12.5"
-        y="2.75"
-        width="5.75"
-        height="14.5"
-        fill="currentColor"
-        opacity={on ? 0.85 : 0}
-        style={{ transition: "opacity 140ms ease" }}
-      />
-    </svg>
-  );
-}
+const CurrentCheck = styled("span")({
+  marginLeft: "auto",
+  display: "inline-flex",
+  alignItems: "center",
+  flexShrink: 0,
+  color: HUD.cyan,
+});
 
-// 归一化坐标 -> 米（手掌长约 0.18m，对应 size 0.24）
-const M = 0.75;
+type Page = "main" | "config" | "task";
 
-function trajOf(wrist: Pt, prev: Pt) {
-  const dx = (wrist.x - prev.x) / 0.12;
-  const dy = (wrist.y - prev.y) / 0.12;
-  return Math.sqrt(dx * dx + dy * dy) * M;
+interface AppBarDevice {
+  id: string;
+  alias?: string;
+  online: boolean;
+  paired: boolean;
 }
 
 interface AppBarProps {
   loggedInUser: string;
   onLogout: () => void;
-  onOpenDataSource: () => void;
   onMenuAction: (action: string) => void;
-  page: "main" | "config";
-  onNavigate: (page: "main" | "config") => void;
-  /** 菜单栏当前视图 + 切换回调，状态在 App 里，右栏那块区域跟着换 */
-  viewMode: ViewMode;
-  onViewMode: (mode: ViewMode) => void;
-  rightPanelOpen: boolean;
-  onToggleRightPanel: () => void;
+  page: Page;
+  onNavigate: (page: Page) => void;
+  /** 在线且已配对的设备 */
+  devices: AppBarDevice[];
+  activeDeviceId: string | null;
+  onSelectDevice: (id: string) => void;
 }
 
 export default function AppBar({
   loggedInUser,
   onLogout,
-  onOpenDataSource,
   onMenuAction,
   page,
   onNavigate,
-  viewMode,
-  onViewMode,
-  rightPanelOpen,
-  onToggleRightPanel,
+  devices,
+  activeDeviceId,
+  onSelectDevice,
 }: AppBarProps) {
-  const [appMenuEl, setAppMenuEl] = useState<null | HTMLElement>(null);
   const [userMenuEl, setUserMenuEl] = useState<null | HTMLElement>(null);
-  const [viewMenuEl, setViewMenuEl] = useState<null | HTMLElement>(null);
-  const { currentTime } = usePlayback();
-
-  const { left, right } = generateTwoHands(currentTime);
-  const prev = generateTwoHands(Math.max(currentTime - 0.12, 0));
-  const vLeft = trajOf(left[0], prev.left[0]);
-  const vRight = trajOf(right[0], prev.right[0]);
+  const [deviceMenuEl, setDeviceMenuEl] = useState<null | HTMLElement>(null);
 
   return (
     <AppBarContainer>
       <ToolbarGrid>
         <StartSection>
-          <LogoButton onClick={(e) => setAppMenuEl(e.currentTarget)}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z"
-                fill={HUD.cyan}
-              />
-            </svg>
-            <ChevronDownIcon style={{ fontSize: 12, marginLeft: 4 }} />
-          </LogoButton>
-          <Menu
-            anchorEl={appMenuEl}
-            open={Boolean(appMenuEl)}
-            onClose={() => setAppMenuEl(null)}
-          >
-            <MenuItem onClick={() => { onMenuAction("打开文件…"); setAppMenuEl(null); }}>打开文件</MenuItem>
-            <MenuItem onClick={() => { onMenuAction("打开连接…"); setAppMenuEl(null); }}>打开连接</MenuItem>
-            <Divider />
-            <MenuItem onClick={() => { onMenuAction("设置"); setAppMenuEl(null); }}>设置</MenuItem>
-            <MenuItem onClick={() => { onMenuAction("帮助与文档"); setAppMenuEl(null); }}>帮助</MenuItem>
-          </Menu>
-
           <MenuBarButton
             className={page === "main" ? "is-active" : undefined}
             onClick={() => onNavigate("main")}
@@ -255,102 +198,128 @@ export default function AppBar({
             首页
           </MenuBarButton>
           <MenuBarButton
-            className={viewMenuEl || viewMode !== "分割图" ? "is-active" : undefined}
-            onClick={(e) => setViewMenuEl(e.currentTarget)}
-            sx={{ gap: 0.5 }}
-          >
-            菜单栏
-            <ChevronDownIcon
-              style={{
-                fontSize: 12,
-                transition: "transform 160ms ease",
-                transform: viewMenuEl ? "rotate(180deg)" : "none",
-              }}
-            />
-          </MenuBarButton>
-          <Menu
-            anchorEl={viewMenuEl}
-            open={Boolean(viewMenuEl)}
-            onClose={() => setViewMenuEl(null)}
-            anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
-          >
-            {VIEW_MODES.map((mode) => (
-              <MenuItem
-                key={mode}
-                selected={viewMode === mode}
-                sx={{
-                  fontSize: 13,
-                  minHeight: 34,
-                  letterSpacing: 1,
-                  color: viewMode === mode ? HUD.cyan : HUD.text,
-                  fontWeight: viewMode === mode ? 600 : 400,
-                }}
-                onClick={() => {
-                  onViewMode(mode);
-                  setViewMenuEl(null);
-                }}
-              >
-                {mode}
-              </MenuItem>
-            ))}
-          </Menu>
-          <MenuBarButton
             className={page === "config" ? "is-active" : undefined}
             onClick={() => onNavigate("config")}
           >
             设备信息
           </MenuBarButton>
+          <MenuBarButton
+            className={page === "task" ? "is-active" : undefined}
+            onClick={() => onNavigate("task")}
+          >
+            任务信息
+          </MenuBarButton>
         </StartSection>
 
         <MiddleSection>
-          <DataSourceDisplay onClick={onOpenDataSource}>
-            <StatusDot status="connected" />
-            <span>双目采集 · 已连接</span>
-            <ChevronDownIcon style={{ fontSize: 12 }} />
+          <DataSourceDisplay
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={Boolean(deviceMenuEl)}
+            aria-label={`双目采集 ${devices.length > 0 ? "已连接" : "未连接"}，共 ${devices.length} 台设备`}
+            onClick={(e) => setDeviceMenuEl(e.currentTarget)}
+          >
+            <StatusDot status={devices.length > 0 ? "connected" : "disconnected"} />
+            <span>
+              <span className="prefix">双目采集 · </span>
+              {devices.length > 0 ? "已连接" : "未连接"}（{devices.length}）
+            </span>
+            <ChevronDownIcon style={{ fontSize: 11, opacity: 0.55 }} />
           </DataSourceDisplay>
+          <Menu
+            anchorEl={deviceMenuEl}
+            open={Boolean(deviceMenuEl)}
+            onClose={() => setDeviceMenuEl(null)}
+            anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+            transformOrigin={{ vertical: "top", horizontal: "center" }}
+            slotProps={{
+              paper: {
+                sx: {
+                  mt: "6px",
+                  width: 216,
+                  p: "4px",
+                  borderRadius: "8px",
+                  backgroundColor: "rgba(6, 13, 27, 0.97)",
+                  border: `1px solid ${HUD.line}`,
+                  boxShadow: "0 16px 40px rgba(0, 0, 0, 0.6)",
+                  backdropFilter: "blur(8px)",
+                },
+              },
+            }}
+          >
+            {devices.length === 0 ? (
+              <MenuItem
+                disabled
+                sx={{
+                  minWidth: 200,
+                  minHeight: 34,
+                  borderRadius: "4px",
+                  fontSize: 12,
+                  opacity: 1,
+                  color: HUD.textDim,
+                }}
+              >
+                暂无已连接设备
+              </MenuItem>
+            ) : (
+              devices.map((device) => {
+                const active = device.id === activeDeviceId;
+                return (
+                  <MenuItem
+                    key={device.id}
+                    selected={active}
+                    aria-current={active ? "true" : undefined}
+                    onClick={() => {
+                      onSelectDevice(device.id);
+                      setDeviceMenuEl(null);
+                    }}
+                    sx={{
+                      minWidth: 200,
+                      minHeight: 34,
+                      gap: "8px",
+                      px: "8px",
+                      borderRadius: "4px",
+                      fontSize: 12.5,
+                      color: HUD.text,
+                      "&.Mui-selected": {
+                        backgroundColor: "rgba(63, 178, 255, 0.10)",
+                        boxShadow: `inset 2px 0 0 ${HUD.cyan}`,
+                        "&:hover": { backgroundColor: "rgba(63, 178, 255, 0.14)" },
+                      },
+                    }}
+                  >
+                    <DeviceDot />
+                    <span style={{ flexShrink: 0 }}>{device.id}</span>
+                    {device.alias ? <DeviceAlias>{device.alias}</DeviceAlias> : null}
+                    {active ? (
+                      <CurrentCheck>
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                          <path
+                            d="M2.5 6.2 4.8 8.5 9.5 3.8"
+                            stroke="currentColor"
+                            strokeWidth="1.6"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </CurrentCheck>
+                    ) : null}
+                  </MenuItem>
+                );
+              })
+            )}
+          </Menu>
         </MiddleSection>
 
         <EndSection>
-          {page === "main" && (
-            <>
-              <TrajBlock $color="#3fd0c9">
-                <TrajDot $color="#3fd0c9" />
-                <span className="hand">左手</span>
-                <span className="val">
-                  {(left[0].x * M).toFixed(2)}, {(left[0].y * M).toFixed(2)}
-                </span>
-                <span className="vel">{vLeft.toFixed(2)}m/s</span>
-              </TrajBlock>
-              <TrajBlock $color={HUD.gold}>
-                <TrajDot $color={HUD.gold} />
-                <span className="hand">右手</span>
-                <span className="val">
-                  {(right[0].x * M).toFixed(2)}, {(right[0].y * M).toFixed(2)}
-                </span>
-                <span className="vel">{vRight.toFixed(2)}m/s</span>
-              </TrajBlock>
-            </>
-          )}
-
-          <Tooltip title={rightPanelOpen ? "收起右侧边栏" : "展开右侧边栏"}>
-            <SideButton
-              $on={rightPanelOpen}
-              aria-label="右侧边栏"
-              aria-pressed={rightPanelOpen}
-              onClick={onToggleRightPanel}
-            >
-              <SidebarIcon on={rightPanelOpen} />
-            </SideButton>
-          </Tooltip>
-
           <Tooltip title="个人资料">
             <IconButton
               onClick={(e) => setUserMenuEl(e.currentTarget)}
               sx={{
-                padding: "4px",
-                borderRadius: 0,
-                transition: "background-color 140ms ease",
-                "&:hover": { backgroundColor: "rgba(63, 178, 255, 0.10)" },
+                padding: "3px",
+                borderRadius: 6,
+                transition: "background-color 160ms ease",
+                "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.05)" },
               }}
             >
               <Avatar
@@ -358,6 +327,7 @@ export default function AppBar({
                 sx={{
                   height: 24,
                   width: 24,
+                  borderRadius: "6px",
                   bgcolor: HUD.cyanDim,
                   fontSize: 11,
                   fontWeight: 600,

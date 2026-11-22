@@ -1,6 +1,10 @@
 import { styled } from "@mui/material/styles";
 import { HUD } from "../../theme/theme";
-import { formatAnnotationTime, usePlayback, type ActionAnnotation } from "../../contexts/PlaybackContext";
+import {
+  formatAnnotationTime,
+  usePlayback,
+  type ActionAnnotation,
+} from "../../contexts/PlaybackContext";
 
 const Bar = styled("div")(({ theme }) => ({
   display: "flex",
@@ -95,11 +99,12 @@ function PauseIcon() {
   );
 }
 
-/** 第二行：左右手两张标注卡 */
+/** 第二行：左右手标注卡 */
 const CardsRow = styled("div")({
   display: "flex",
   gap: 10,
   flex: 1,
+  minWidth: 0,
   minHeight: 0,
 });
 
@@ -126,6 +131,8 @@ const CardHead = styled("div")({
 });
 
 const HandChip = styled("span")<{ $hand: "left" | "right" }>(({ $hand }) => ({
+  flexShrink: 0,
+  whiteSpace: "nowrap",
   fontSize: 13,
   fontWeight: 600,
   letterSpacing: 1,
@@ -136,10 +143,14 @@ const HandChip = styled("span")<{ $hand: "left" | "right" }>(({ $hand }) => ({
 }));
 
 const ActionTitle = styled("span")({
+  minWidth: 0,
   fontSize: 14,
   fontWeight: 600,
   letterSpacing: 1,
   color: HUD.text,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
 });
 
 const TimeRange = styled("span")({
@@ -148,6 +159,7 @@ const TimeRange = styled("span")({
   fontSize: 12,
   fontVariantNumeric: "tabular-nums",
   color: HUD.textDim,
+  "@media (max-width: 900px)": { display: "none" },
 });
 
 const ActionText = styled("div")({
@@ -159,6 +171,7 @@ const ActionText = styled("div")({
   WebkitLineClamp: 2,
   WebkitBoxOrient: "vertical",
   overflow: "hidden",
+  "@media (max-width: 900px)": { fontSize: 18 },
 });
 
 const ObjectLine = styled("div")({
@@ -177,7 +190,7 @@ function pickActive(list: ActionAnnotation[], t: number): ActionAnnotation | und
   );
 }
 
-/** 底部标注条：上=标题行（含时间码），下=左右手两张动作标注卡 */
+/** 底部标注条：上=标题行（含时间码），下=左右手动作标注卡 */
 export default function AnnotationBar() {
   const { annotations, currentTime, duration, seek, isPlaying, setPlaying } = usePlayback();
 
