@@ -1,0 +1,27 @@
+{
+  "name": "helmet-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "抓鸡作业智能头盔 · 现场管理服务数据库访问层",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "migrate": "node src/cli/migrate.ts",
+    "serve": "node src/cli/serve.ts",
+    "dev": "node --watch-path=src src/cli/serve.ts",
+    "test": "node --test",
+    "typecheck": "tsc -p tsconfig.json",
+    "seed": "node src/cli/seed.ts",
+    "db": "node src/cli/migrate.ts && node src/cli/seed.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/ws": "^8.18.2",
+    "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
+}
