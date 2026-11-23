@@ -1,5 +1,5 @@
 /**
- *  vendored：sheyuan-ui/sheyuan-ui @ 9ea16e1  src/contracts/api.ts
+ *  vendored：sheyuan-ui/sheyuan-ui @ 9ea16e1，T05 增补设备注册与心跳路径
  *  路由与 WS 主题以本文件为准，不在实现里另写字符串。
  *
  * T02 接口路径清单
@@ -12,6 +12,10 @@ export const API = {
   device: (id: string) => `/api/devices/${id}`,
   deviceStatus: (id: string) => `/api/devices/${id}/status`,
   deviceSessions: (id: string) => `/api/devices/${id}/sessions`,
+  /** 设备侧：注册（X-Device-Token 鉴权，不走用户角色） */
+  deviceRegister: "/api/devices/register",
+  /** 设备侧：心跳上报 */
+  deviceHeartbeat: (id: string) => `/api/devices/${id}/heartbeat`,
   pairCode: "/api/devices/pair-code",
   pair: "/api/devices/pair",
   previewOffer: (deviceId: string) => `/api/devices/${deviceId}/preview/offer`,

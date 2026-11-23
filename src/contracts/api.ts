@@ -9,6 +9,10 @@ export const API = {
   device: (id: string) => `/api/devices/${id}`,
   deviceStatus: (id: string) => `/api/devices/${id}/status`,
   deviceSessions: (id: string) => `/api/devices/${id}/sessions`,
+  /** 设备侧：注册（X-Device-Token 鉴权，不走用户角色） */
+  deviceRegister: "/api/devices/register",
+  /** 设备侧：心跳上报 */
+  deviceHeartbeat: (id: string) => `/api/devices/${id}/heartbeat`,
   pairCode: "/api/devices/pair-code",
   pair: "/api/devices/pair",
   previewOffer: (deviceId: string) => `/api/devices/${deviceId}/preview/offer`,

@@ -11,6 +11,9 @@ export interface DeviceRecord {
   alias: string | null;
   pair_status: PairStatus;
   ip_address: string | null;
+  /** 注册时上报的设备档案；未注册过为 null */
+  model: string | null;
+  firmware_version: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -24,6 +27,8 @@ interface DeviceRow {
   alias: string | null;
   pair_status: PairStatus;
   ip_address: string | null;
+  model: string | null;
+  firmware_version: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -50,6 +55,8 @@ function toDevice(row: DeviceRow): DeviceRecord {
     alias: row.alias,
     pair_status: row.pair_status,
     ip_address: row.ip_address,
+    model: row.model,
+    firmware_version: row.firmware_version,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -83,19 +90,37 @@ export class DeviceRepository {
   }
 
   /** 心跳可自动注册未配对设备；已存在的设备不改别名与配对状态。 */
-  register(deviceId: string, options: { alias?: string | null; ipAddress?: string | null } = {}): DeviceRecord {
+  register(
+    deviceId: string,
+    options: {
+      alias?: string | null;
+      ipAddress?: string | null;
+      model?: string | null;
+      firmwareVersion?: string | null;
+    } = {},
+  ): DeviceRecord {
     if (!deviceId) throw new ValidationError("device_id 不能为空");
     const now = nowIso();
     this.db
       .prepare(
-        `INSERT INTO device (device_id, alias, pair_status, ip_address, created_at, updated_at)
-         VALUES (?, ?, 'unpaired', ?, ?, ?)
+        `INSERT INTO device (device_id, alias, pair_status, ip_address, model, firmware_version, created_at, updated_at)
+         VALUES (?, ?, 'unpaired', ?, ?, ?, ?, ?)
          ON CONFLICT (device_id) DO UPDATE SET
            alias = COALESCE(device.alias, excluded.alias),
            ip_address = COALESCE(excluded.ip_address, device.ip_address),
+           model = COALESCE(excluded.model, device.model),
+           firmware_version = COALESCE(excluded.firmware_version, device.firmware_version),
            updated_at = excluded.updated_at`,
       )
-      .run(deviceId, options.alias ?? null, options.ipAddress ?? null, now, now);
+      .run(
+        deviceId,
+        options.alias ?? null,
+        options.ipAddress ?? null,
+        options.model ?? null,
+        options.firmwareVersion ?? null,
+        now,
+        now,
+      );
     const device = this.getDevice(deviceId);
     if (!device) throw new NotFoundError("设备", deviceId);
     return device;

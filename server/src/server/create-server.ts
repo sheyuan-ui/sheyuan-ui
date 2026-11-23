@@ -17,8 +17,9 @@ import { readHeader } from "./headers.ts";
 import { Hub } from "./hub.ts";
 import { HttpError, toErrorPayload } from "./http-errors.ts";
 import { recordAccessDenied } from "./middleware/audit.ts";
-import { enforcePolicy, requiredPolicy } from "./middleware/roles.ts";
+import { enforcePolicy, isDeviceRoute, requiredPolicy } from "./middleware/roles.ts";
 import { Router, type RequestContext, type RouteResult } from "./router.ts";
+import { createOfflineSweeper, type OfflineSweeper } from "./sweeper.ts";
 
 export interface HelmetServerOptions {
   db: Db;
@@ -37,11 +38,19 @@ export interface HelmetServerOptions {
   accessTokenTtlSeconds?: number;
   /** 刷新令牌有效期，默认 30 天 */
   refreshTokenTtlSeconds?: number;
+  /** 设备令牌：设置后 /api/devices/register 与心跳必须携带 X-Device-Token；未设置时默认读环境变量 */
+  deviceToken?: string;
+  /** 建议心跳间隔，默认 5 秒，随注册/心跳响应下发给设备 */
+  heartbeatIntervalMs?: number;
+  /** 超过该时长未心跳判离线，默认 15 秒 */
+  offlineTimeoutMs?: number;
 }
 
 export interface HelmetServer {
   server: Server;
   hub: Hub;
+  /** 心跳超时判定任务：listen 时启动，close 时停止；run() 可手动触发一次 */
+  sweeper: OfflineSweeper;
   listen(port?: number, host?: string): Promise<AddressInfo>;
   close(): Promise<void>;
 }
@@ -68,6 +77,10 @@ function tokenMatches(provided: string | undefined, expected: string): boolean {
   const left = Buffer.from(provided);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function normalizeToken(value: string | undefined): string | undefined {
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 function authorized(req: IncomingMessage, token: string): boolean {
@@ -112,6 +125,27 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
     void handleRequest(req, res);
   });
   const hub = new Hub(server, { token: options.token });
+  const deviceToken = normalizeToken(options.deviceToken ?? process.env.HELMET_HUB_DEVICE_TOKEN);
+  const sweeper = createOfflineSweeper(repos, hub, {
+    heartbeatIntervalMs: options.heartbeatIntervalMs,
+    offlineTimeoutMs: options.offlineTimeoutMs,
+    logger: options.logger,
+  });
+  let warnedDeviceToken = false;
+
+  /** 设备不是自然人账号：注册与心跳只校验设备令牌，不进入角色矩阵 */
+  function authorizeDevice(req: IncomingMessage): void {
+    if (deviceToken === undefined) {
+      if (options.requireAuth === true && !warnedDeviceToken) {
+        warnedDeviceToken = true;
+        options.logger?.("未配置 HELMET_HUB_DEVICE_TOKEN：设备注册与心跳接口当前不鉴权");
+      }
+      return;
+    }
+    if (!tokenMatches(readHeader(req.headers, "x-device-token"), deviceToken)) {
+      throw new HttpError("UNAUTHORIZED", "设备令牌无效或缺失");
+    }
+  }
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = readHeader(req.headers, "x-request-id") ?? randomUUID();
@@ -121,7 +155,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
     res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
     res.setHeader(
       "access-control-allow-headers",
-      "Content-Type, Authorization, Idempotency-Key, X-Request-Id, X-Actor-Id",
+      "Content-Type, Authorization, Idempotency-Key, X-Request-Id, X-Actor-Id, X-Device-Token",
     );
     res.setHeader("access-control-expose-headers", "X-Request-Id");
     res.setHeader("access-control-max-age", "600");
@@ -149,13 +183,16 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
       }
 
       // 先解析身份，再按角色矩阵放行：JWT 优先，共享令牌等价于部署方 admin
+      const policy = requiredPolicy(req.method ?? "GET", url.pathname);
+      const deviceRoute = policy === "device";
+
       actor = authService.authenticate(readHeader(req.headers, "authorization"));
       if (actor === null && options.token !== undefined && authorized(req, options.token)) {
         actor = SYSTEM_ACTOR;
       }
 
-      // 旧共享令牌开启时仍要求携带令牌；三角色矩阵只在 requireAuth 下生效
-      if (options.token !== undefined && actor === null) {
+      // 旧共享令牌开启时仍要求携带令牌；设备侧接口改用设备令牌，不要求人账号
+      if (!deviceRoute && options.token !== undefined && actor === null) {
         req.resume();
         throw new HttpError("UNAUTHORIZED");
       }
@@ -166,8 +203,10 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
         throw new HttpError("NOT_FOUND", `接口不存在：${req.method ?? "GET"} ${url.pathname}`);
       }
 
-      if (options.requireAuth === true) {
-        enforcePolicy(requiredPolicy(req.method ?? "GET", url.pathname), actor);
+      if (deviceRoute) {
+        authorizeDevice(req);
+      } else if (options.requireAuth === true) {
+        enforcePolicy(policy, actor);
       }
 
       const ctx: RequestContext = {
@@ -181,6 +220,10 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
         uploadDir: options.uploadDir,
         auth: actor,
         authService,
+        devicePolicy: {
+          heartbeatIntervalMs: sweeper.heartbeatIntervalMs,
+          offlineTimeoutMs: sweeper.offlineTimeoutMs,
+        },
       };
       const result: RouteResult = await match.handler(ctx);
       sendJson(res, result.status, { data: result.data, request_id: requestId }, result.headers);
@@ -219,6 +262,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
   return {
     server,
     hub,
+    sweeper,
     listen(port = 8080, host = "0.0.0.0") {
       return new Promise<AddressInfo>((resolve, reject) => {
         const onError = (error: Error) => {
@@ -227,6 +271,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
         };
         const onListening = () => {
           server.off("error", onError);
+          sweeper.start();
           resolve(server.address() as AddressInfo);
         };
         server.once("error", onError);
@@ -235,6 +280,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
       });
     },
     async close() {
+      sweeper.stop();
       hub.close();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

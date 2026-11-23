@@ -23,6 +23,14 @@ if (userCount === 0 && process.env.HELMET_HUB_AUTH !== "off") {
   console.log("库中暂无账号：先执行 npm run user -- create <用户名> admin 再登录");
 }
 
+function intEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.length === 0) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} 必须为正整数`);
+  return value;
+}
+
 const app = createHelmetServer({
   db,
   uploadDir,
@@ -30,6 +38,9 @@ const app = createHelmetServer({
   // 现场默认开启三角色鉴权；本地免登录联调可设 HELMET_HUB_AUTH=off
   requireAuth: process.env.HELMET_HUB_AUTH !== "off",
   jwtSecret: process.env.HELMET_HUB_JWT_SECRET,
+  deviceToken: process.env.HELMET_HUB_DEVICE_TOKEN,
+  heartbeatIntervalMs: intEnv("HELMET_HUB_HEARTBEAT_INTERVAL_MS"),
+  offlineTimeoutMs: intEnv("HELMET_HUB_OFFLINE_TIMEOUT_MS"),
   logger: (message) => console.error(message),
 });
 const address = await app.listen(port, host);

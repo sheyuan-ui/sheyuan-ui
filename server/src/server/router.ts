@@ -22,6 +22,15 @@ export interface RequestContext {
   /** 验签后的请求身份；未认证为 null */
   auth: AuthUser | null;
   authService: AuthService;
+  /** 设备心跳与离线判定策略，注册/心跳响应按此告知设备 */
+  devicePolicy: DevicePolicy;
+}
+
+export interface DevicePolicy {
+  /** 建议心跳间隔（毫秒） */
+  heartbeatIntervalMs: number;
+  /** 超过该时长未心跳即判离线（毫秒） */
+  offlineTimeoutMs: number;
 }
 
 export type RouteHandler = (ctx: RequestContext) => Promise<RouteResult> | RouteResult;

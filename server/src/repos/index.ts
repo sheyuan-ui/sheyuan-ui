@@ -5,6 +5,7 @@ import { DeviceRepository } from "./devices.ts";
 import { EventRepository } from "./events.ts";
 import { IdempotencyRepository } from "./idempotency.ts";
 import { JobRepository } from "./jobs.ts";
+import { PresenceRepository } from "./presence.ts";
 import { RefreshTokenRepository } from "./refresh-tokens.ts";
 import { SessionRepository } from "./sessions.ts";
 import { UploadRepository } from "./uploads.ts";
@@ -21,6 +22,7 @@ export {
 export { EventRepository } from "./events.ts";
 export { IdempotencyRepository, type IdempotencyReservation } from "./idempotency.ts";
 export { JobRepository, type JobFilter } from "./jobs.ts";
+export { PresenceRepository, type PresenceRecord } from "./presence.ts";
 export {
   SessionRepository,
   type ScoreChangeReason,
@@ -37,6 +39,7 @@ export { UserRepository, type UserRecord, type UserStatus, type CreateUserInput 
 
 export interface Repositories {
   devices: DeviceRepository;
+  presence: PresenceRepository;
   jobs: JobRepository;
   sessions: SessionRepository;
   events: EventRepository;
@@ -51,6 +54,7 @@ export interface Repositories {
 export function createRepositories(db: Db): Repositories {
   return {
     devices: new DeviceRepository(db),
+    presence: new PresenceRepository(db),
     jobs: new JobRepository(db),
     sessions: new SessionRepository(db),
     events: new EventRepository(db),

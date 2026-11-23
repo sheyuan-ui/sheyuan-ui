@@ -50,6 +50,7 @@ erDiagram
 | `alias` | TEXT | 页面别名，契约无此字段，仅内部展示 |
 | `pair_status` | TEXT | `unpaired` / `paired` / `revoked`；未配对设备仍可上报心跳 |
 | `ip_address` | TEXT | 仅配对流程使用，不对外展示（T02 交接说明） |
+| `model`、`firmware_version` | TEXT | T05 新增：注册时上报的设备档案，可空；心跳可省略并沿用 |
 
 `device_status`（每设备一行最新状态）
 
@@ -222,3 +223,17 @@ erDiagram
 
 未决：`session.operator_id` 等自由文本字段是否补外键，仍按 §9 末尾的结论保持现状，
 等人员档案确定后另起迁移，不在本次改动内。
+
+## 11. 设备注册与心跳（T05 新增，`0004_device_presence.sql`）
+
+| 表/列 | 用途 | 关键约束 |
+| --- | --- | --- |
+| `device.model`、`device.firmware_version` | 注册时上报的设备档案 | 可空；心跳可省略，沿用注册值 |
+| `device_presence` | 在场状态，与 `device_status` 分表 | 每设备一行；`online` 0/1；`last_seen` 为服务端收到心跳时刻；`offline_since` 在线时清空；索引 `(online, last_seen)` |
+
+- **双写分工**：心跳把设备上报快照写 `device_status`（按 `state_version` 丢弃陈旧值），把「服务端最近一次收到心跳」写 `device_presence`。在线/离线不混进设备上报字段。
+- **超时判定**：`OfflineSweeper` 每 5 秒扫描 `online = 1 AND last_seen < now - offlineTimeout`（默认 15 秒），命中即置离线并向 `device.status` 推送 `{ device_id, online: false, last_seen, offline_since }`；心跳恢复时推送 `online: true`。只在状态翻转时推送，不随每条心跳发消息。
+- **四态归属**：运行中 / 在线 / 离线 / 故障的派生与展示归 T07，本层只提供在场状态。
+- **接口**：`POST /api/devices/register`、`POST /api/devices/{id}/heartbeat`，走设备令牌策略（请求头 `X-Device-Token`，环境变量 `HELMET_HUB_DEVICE_TOKEN`），不进入人账号角色矩阵；未配置令牌时接口放行并只告警一次，便于本地联调。
+- **策略下发**：注册与心跳响应返回 `heartbeat_interval_ms` / `offline_timeout_ms`；可用 `HELMET_HUB_HEARTBEAT_INTERVAL_MS` / `HELMET_HUB_OFFLINE_TIMEOUT_MS` 覆盖。
+- **陈旧上报**：不写 `device_status`，但仍刷新在场状态——设备是活着的，只是快照过期。
