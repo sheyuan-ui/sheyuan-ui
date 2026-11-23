@@ -21,14 +21,15 @@ export function registerEventRoutes(router: Router): void {
       const eventId = ctx.params.id as string;
       const input = asObject(body.value);
       const conclusion = enumOf(input, "conclusion", CONCLUSIONS);
-      const actor = readHeader(ctx.req.headers, "x-actor-id") ?? null;
+      // 验签身份优先；无认证（本地演示）时才回落到请求体与 X-Actor-Id
+      const actor = ctx.auth?.user_id ?? readHeader(ctx.req.headers, "x-actor-id") ?? null;
 
       const review: EventReview =
         conclusion === "pending"
           ? { conclusion, reviewer_id: null, reviewed_at: null, remark: nullableStr(input, "remark") }
           : {
               conclusion,
-              reviewer_id: nullableStr(input, "reviewer_id") ?? actor,
+              reviewer_id: actor,
               reviewed_at:
                 input.reviewed_at === undefined ? nowIso() : isoStr(input, "reviewed_at"),
               remark: nullableStr(input, "remark"),
@@ -37,6 +38,7 @@ export function registerEventRoutes(router: Router): void {
       const updated = ctx.repos.events.review(eventId, review);
       ctx.repos.audit.append({
         actor_id: review.reviewer_id,
+        actor_role: ctx.auth?.role ?? null,
         action: "event.review",
         target_type: "event",
         target_id: eventId,

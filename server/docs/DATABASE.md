@@ -193,7 +193,7 @@ erDiagram
 
 **本层已预留的接口点**
 
-- `audit_log.actor_id` / `audit_log.actor_role`：列与 `viewer / operator / admin` 枚举已建；当前只有事件复核写 `actor_id`，`actor_role` 尚无写入方，接手后由认证层填。
+- `audit_log.actor_id` / `audit_log.actor_role`：列与 `viewer / operator / admin` 枚举已建；当前只有事件复核写 `actor_id`，`actor_role` 尚无写入方，接手后由认证层填。（T04 已补齐，见 §10）
 - `UNAUTHORIZED`（401）/ `FORBIDDEN`（403）：错误码已在 `src/contracts/errors.ts` 定义，前端按 `code` 分支。
 - 请求上下文：HTTP 已放行 `Authorization`、`X-Actor-Id` 请求头；验签后的身份可在进入路由前注入，替换当前可选的共享令牌（`HELMET_HUB_TOKEN`）。
 - 审计仓储：`src/repos/audit.ts` 的 `append` / `list` / `listByTarget` 可直接记录认证事件。
@@ -207,3 +207,18 @@ erDiagram
 **需要先定的建模决策**
 
 `session.operator_id`、`event.reviewer_id`、`upload.owner_id`、`job.owner_name` 目前是自由文本。认证上线后是否增加 `user` 外键或人员对照表，由本层评估并用新迁移落地；未定前保持现状，不为兼容认证提前改列。
+
+## 10. 认证表（T04 新增，`0003_auth.sql`）
+
+按 §9 的接手约定落地：只新增迁移，`0001` / `0002` 校验和未变；认证契约不进 `src/contracts/` 副本。
+
+| 表 | 用途 | 关键约束 |
+| --- | --- | --- |
+| `app_user` | 账号、角色、状态 | `username` 唯一且 `COLLATE NOCASE`；`role ∈ (viewer, operator, admin)`；`status ∈ (active, disabled)`；`password_hash` 为 `scrypt$N$r$p$salt$hash`，参数随哈希存，便于升级 |
+| `auth_refresh_token` | 刷新令牌（一次会话一条） | 只存 `token_hash`（SHA-256）；`revoked_at` 与 `revoked_reason` 必须同时有或同时无；`revoked_reason ∈ (logout, rotated, reuse_detected, disabled)`；`replaced_by` 指向轮换后的新令牌 |
+
+访问令牌（JWT）不落库；账号停用或角色变更在下次请求时即时生效。
+`auth_refresh_token.user_id` 外键指向 `app_user` 并 `ON DELETE CASCADE`，删账号即清会话。
+
+未决：`session.operator_id` 等自由文本字段是否补外键，仍按 §9 末尾的结论保持现状，
+等人员档案确定后另起迁移，不在本次改动内。

@@ -72,6 +72,8 @@ export function registerCommandRoutes(router: Router): void {
 
         const row = ctx.repos.commands.create(command);
         ctx.repos.audit.append({
+          actor_id: ctx.auth?.user_id ?? null,
+          actor_role: ctx.auth?.role ?? null,
           action: "command.issue",
           target_type: "command",
           target_id: row.command_id,

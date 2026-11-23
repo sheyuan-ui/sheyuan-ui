@@ -1,3 +1,5 @@
+import type { AuthService } from "../auth/service.ts";
+import type { AuthUser } from "../auth/roles.ts";
 import type { Hub } from "./hub.ts";
 import type { Repositories } from "../repos/index.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -17,6 +19,9 @@ export interface RequestContext {
   repos: Repositories;
   hub: Hub;
   uploadDir: string;
+  /** 验签后的请求身份；未认证为 null */
+  auth: AuthUser | null;
+  authService: AuthService;
 }
 
 export type RouteHandler = (ctx: RequestContext) => Promise<RouteResult> | RouteResult;

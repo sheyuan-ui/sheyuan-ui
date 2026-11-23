@@ -14,6 +14,7 @@
     "test": "node --test",
     "typecheck": "tsc -p tsconfig.json",
     "seed": "node src/cli/seed.ts",
+    "user": "node src/cli/user.ts",
     "db": "node src/cli/migrate.ts && node src/cli/seed.ts"
   },
   "devDependencies": {

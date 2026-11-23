@@ -50,10 +50,11 @@ npm run serve   # 默认 http://0.0.0.0:8080
 
 ## 3. 接口清单
 
-路径常量全部来自 `API`，实现中不另写字符串。
+路径常量来自 `API`；认证相关路径来自 `AUTH_API`（见 `src/server/handlers/auth.ts`），不写入上游只读副本 `src/contracts/api.ts`。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| POST | `/api/auth/login` | 登录，返回访问令牌 + 刷新令牌；公开 |
 | GET | `/api/devices` | 设备总览：`DeviceSummary[]`（配对态 + 别名 + 最新状态） |
 | GET | `/api/devices/{id}` | 单台设备总览；不存在 404 |
 | GET | `/api/devices/{id}/status` | 最新 `DeviceStatus`；设备存在但未上报 404 |
@@ -75,6 +76,10 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | GET | `/api/uploads/{id}` | 上传进度与状态 |
 | POST | `/api/uploads/{id}/chunks?chunk_index=` | 上传一个分块（二进制） |
 | POST | `/api/uploads/{id}/complete` | 校验本地文件并置为 `verified` |
+| POST | `/api/auth/refresh` | 刷新并轮换令牌；旧令牌立即失效；公开 |
+| POST | `/api/auth/logout` | 吊销刷新令牌，幂等 |
+| GET | `/api/auth/me` | 当前身份：`user_id / username / display_name / role` |
+| GET | `/api/audit?limit=` | 审计流水，仅 `admin`；`limit` 1–500，默认 100 |
 | GET | `/healthz` | `{ status: "ok", now }`，不鉴权 |
 
 分页响应统一为 `{ items, page, page_size, total }`，默认 `page=1`、`page_size=50`，上限 200。
@@ -160,3 +165,30 @@ npm run serve   # 默认 http://0.0.0.0:8080
 
 集成测试见 `tests/api.test.ts`：响应外壳、幂等重放/冲突、乐观锁、配对、复核留痕、
 分块上传 + SHA-256、WebSocket 推送、令牌保护。
+
+## 9. 认证与授权（T04）
+
+**模型**：账号口令（scrypt）→ 短期访问令牌（HS256 JWT，默认 900 秒）+ 刷新令牌（30 天，只存 SHA-256）。
+刷新即轮换：旧令牌立即吊销；已吊销令牌再次出现视为泄漏，整账号令牌全部吊销（`reuse_detected`）。
+访问令牌不落库，账号停用或角色变更在下次请求时即时生效（验签后回查账号）。
+
+**角色矩阵**（集中定义在 `src/server/middleware/roles.ts`，高等级自动满足低等级）：
+
+| 请求 | 要求 |
+| --- | --- |
+| `POST /api/auth/login`、`POST /api/auth/refresh` | 公开 |
+| `GET /api/audit` | `admin` |
+| 其余 `GET /api/*` | `viewer` |
+| 其余写方法（`POST/PUT/PATCH/DELETE /api/*`） | `operator` |
+
+开关：`requireAuth`（CLI 由 `HELMET_HUB_AUTH=off` 关闭）。关闭时保持免登录演示路径；
+开启时未认证统一 401，角色不足 403，并写审计。
+
+**认证事件审计**（`audit_log.action`）：`auth.login`、`auth.login_failed`、`auth.login_rejected`、
+`auth.refresh`、`auth.refresh_reuse`、`auth.logout`、`auth.unauthenticated`、`auth.forbidden`。
+业务写接口（指令下发、配对、事件复核）的 `actor_id` / `actor_role` 由验签身份注入，
+演示占位 `X-Actor-Id` 只在未开启鉴权时回落到请求头。
+
+**建账号**：`npm run user -- create <用户名> <viewer|operator|admin>`，不传 `--password` 时生成随机口令并打印一次。
+
+测试见 `tests/auth.test.ts`：登录与口令校验、过期令牌、三角色放行与越权留痕、刷新轮换与复用检测、停用立即生效。

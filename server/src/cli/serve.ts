@@ -16,10 +16,20 @@ if (!Number.isInteger(port) || port < 0 || port > 65_535) {
 const db = openDatabase({ file: dbPath });
 migrate(db, migrationsDir);
 
+const userCount = Number(
+  (db.prepare("SELECT COUNT(*) AS n FROM app_user").get() as unknown as { n: number }).n,
+);
+if (userCount === 0 && process.env.HELMET_HUB_AUTH !== "off") {
+  console.log("库中暂无账号：先执行 npm run user -- create <用户名> admin 再登录");
+}
+
 const app = createHelmetServer({
   db,
   uploadDir,
   token: process.env.HELMET_HUB_TOKEN,
+  // 现场默认开启三角色鉴权；本地免登录联调可设 HELMET_HUB_AUTH=off
+  requireAuth: process.env.HELMET_HUB_AUTH !== "off",
+  jwtSecret: process.env.HELMET_HUB_JWT_SECRET,
   logger: (message) => console.error(message),
 });
 const address = await app.listen(port, host);

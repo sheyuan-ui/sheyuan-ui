@@ -16,22 +16,24 @@
 ```
 src/
   contracts/        T02 契约类型与 mock（上游只读复制）
+  auth/             口令哈希、短期 JWT、认证服务（T04）
   db/
     open.ts         打开数据库与 PRAGMA
     migrate.ts      migrations/*.sql 迁移器（校验和、事务、幂等）
     transaction.ts  BEGIN IMMEDIATE / 嵌套 SAVEPOINT
-    migrations/     0001_init.sql、0002_upload_chunk.sql
+    migrations/     0001_init.sql、0002_upload_chunk.sql、0003_auth.sql
     time.ts         UTC ISO 8601 规范化
-  repos/            六对象 + 幂等键 + 审计的访问层
+  repos/            六对象 + 幂等键 + 审计 + 账号/刷新令牌的访问层
   server/
-    create-server.ts  HTTP 服务、CORS、请求 ID、令牌、统一响应
+    create-server.ts  HTTP 服务、CORS、请求 ID、身份解析、统一响应
     router.ts         方法 + 路径模板匹配
     idempotency.ts    写接口幂等
     hub.ts            WebSocket 主题订阅与推送
-    handlers/         六对象与上传接口
+    middleware/       三角色矩阵与拒绝访问审计
+    handlers/         六对象、上传与认证接口
   seed/demo.ts      MOCK_CONTRACT 演示数据
-  cli/              migrate / seed / serve 命令
-tests/              node:test（仓储 + HTTP/WS 集成）
+  cli/              migrate / seed / serve / user 命令
+tests/              node:test（仓储 + HTTP/WS 集成 + 认证）
 data/               默认数据库与上传目录（不提交）
 ```
 
@@ -44,7 +46,8 @@ data/               默认数据库与上传目录（不提交）
 | `npm run seed` | 写入或重置演示数据 |
 | `npm run serve` | 启动管理服务（默认 `0.0.0.0:8080`） |
 | `npm run dev` | 监听 `src/` 变化自动重启 |
-| `npm test` | 运行仓储与 HTTP/WS 集成测试 |
+| `npm run user` | 账号维护：`create <用户名> <viewer\|operator\|admin>` / `list` |
+| `npm test` | 运行仓储、HTTP/WS 集成与认证测试 |
 | `npm run typecheck` | 类型检查 |
 
 `node src/cli/migrate.ts <路径>` / `node src/cli/seed.ts <路径>` 可指定库文件；
@@ -57,15 +60,31 @@ data/               默认数据库与上传目录（不提交）
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | 监听端口与地址 |
 | `HELMET_HUB_DB` | `data/helmet-hub.db` | 启动时自动迁移 |
 | `HELMET_HUB_UPLOAD_DIR` | `data/uploads` | 分块落盘目录 |
-| `HELMET_HUB_TOKEN` | 未设置 | 设置后 `/api` 与 `/ws` 需 Bearer 令牌 |
+| `HELMET_HUB_TOKEN` | 未设置 | 设置后 `/api` 与 `/ws` 需 Bearer 令牌；持令牌者按部署方 `admin` 记录审计 |
+| `HELMET_HUB_AUTH` | 开启 | 设为 `off` 关闭三角色鉴权，回到免登录演示路径 |
+| `HELMET_HUB_JWT_SECRET` | 随机生成 | 访问令牌签名密钥，至少 32 字符；不设则每次重启令牌全失效 |
 
 ## 使用
 
 ```bash
 npm run db
+npm run user -- create admin admin      # 首次使用先建账号，随机口令只打印一次
 npm run serve
-curl http://127.0.0.1:8080/api/devices
+curl http://127.0.0.1:8080/api/devices  # 开启鉴权后返回 401
 ```
+
+登录拿令牌（`expires_in` 为访问令牌剩余秒数，到期用 `refresh_token` 换新）：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<口令>"}'
+
+curl http://127.0.0.1:8080/api/devices -H "Authorization: Bearer <access_token>"
+```
+
+角色矩阵：读取需 `viewer`，写入需 `operator`，审计流水 `/api/audit` 仅 `admin`；
+越权与未登录请求都会写入 `audit_log`。细节见 [docs/API.md](docs/API.md) 第 9 节。
 
 写入接口必须带 `Idempotency-Key`：
 

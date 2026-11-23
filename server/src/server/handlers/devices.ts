@@ -99,6 +99,8 @@ export function registerDeviceRoutes(router: Router): void {
         ctx.repos.devices.setPairStatus(result.device_id, "paired", ipAddress);
       }
       ctx.repos.audit.append({
+        actor_id: ctx.auth?.user_id ?? null,
+        actor_role: ctx.auth?.role ?? null,
         action: "device.pair",
         target_type: "device",
         target_id: result.device_id,

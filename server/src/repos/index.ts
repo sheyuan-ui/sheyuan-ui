@@ -5,8 +5,10 @@ import { DeviceRepository } from "./devices.ts";
 import { EventRepository } from "./events.ts";
 import { IdempotencyRepository } from "./idempotency.ts";
 import { JobRepository } from "./jobs.ts";
+import { RefreshTokenRepository } from "./refresh-tokens.ts";
 import { SessionRepository } from "./sessions.ts";
 import { UploadRepository } from "./uploads.ts";
+import { UserRepository } from "./users.ts";
 
 export { AuditRepository, type ActorRole, type AuditEntry, type AuditInput } from "./audit.ts";
 export { CommandRepository } from "./commands.ts";
@@ -26,6 +28,12 @@ export {
   type SessionFilter,
 } from "./sessions.ts";
 export { UploadRepository } from "./uploads.ts";
+export {
+  RefreshTokenRepository,
+  type RefreshTokenRecord,
+  type RevokeReason,
+} from "./refresh-tokens.ts";
+export { UserRepository, type UserRecord, type UserStatus, type CreateUserInput } from "./users.ts";
 
 export interface Repositories {
   devices: DeviceRepository;
@@ -36,6 +44,8 @@ export interface Repositories {
   uploads: UploadRepository;
   idempotency: IdempotencyRepository;
   audit: AuditRepository;
+  users: UserRepository;
+  refreshTokens: RefreshTokenRepository;
 }
 
 export function createRepositories(db: Db): Repositories {
@@ -48,5 +58,7 @@ export function createRepositories(db: Db): Repositories {
     uploads: new UploadRepository(db),
     idempotency: new IdempotencyRepository(db),
     audit: new AuditRepository(db),
+    users: new UserRepository(db),
+    refreshTokens: new RefreshTokenRepository(db),
   };
 }
