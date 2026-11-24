@@ -2,6 +2,7 @@ import type { Router } from "../router.ts";
 import { registerAuthRoutes } from "./auth.ts";
 import { registerCommandRoutes } from "./commands.ts";
 import { registerDeviceRoutes } from "./devices.ts";
+import { registerEvaluationRoutes } from "./evaluations.ts";
 import { registerEventRoutes } from "./events.ts";
 import { registerJobRoutes } from "./jobs.ts";
 import { registerSessionRoutes } from "./sessions.ts";
@@ -12,6 +13,7 @@ export function registerAllRoutes(router: Router): void {
   registerDeviceRoutes(router);
   registerJobRoutes(router);
   registerSessionRoutes(router);
+  registerEvaluationRoutes(router);
   registerEventRoutes(router);
   registerCommandRoutes(router);
   registerUploadRoutes(router);

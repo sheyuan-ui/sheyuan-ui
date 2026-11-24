@@ -132,6 +132,48 @@ export interface Session {
   score: SessionScore;
 }
 
+/* ------------------------------ 评估报告 ------------------------------ */
+
+/** 算法侧计分状态；与 SessionScore.status 语义不同，报告原样保存 */
+export type EvaluationScoreStatus = "scoring_not_defined" | "insufficient_data" | "scored";
+
+export type RuleResultOutcome = "compliant" | "noncompliant" | "unknown" | "not_applicable";
+
+export interface RuleResult {
+  rule_id: string;
+  rule_name: string;
+  result: RuleResultOutcome;
+  /** 违规发生时间，距本轮开始的秒数；无违规则为 null */
+  violation_time_seconds: number | null;
+  score: number | null;
+  /** 因本条规则被扣除的分值 */
+  deducted_points: number | null;
+  reason: string;
+}
+
+export interface OperationResult {
+  operation_id: string;
+  /** 距本轮开始的秒数 */
+  start_time_seconds: number;
+  end_time_seconds: number | null;
+  score: number | null;
+  rule_results: RuleResult[];
+}
+
+/** 算法侧评分输出：一轮作业（会话）一份，按 score_version 留档 */
+export interface EvaluationReport {
+  task_id: SessionId;
+  scene: Scenario;
+  total_score: number | null;
+  score_status: EvaluationScoreStatus;
+  operations: OperationResult[];
+  /** 服务端生成：与 session.score 的版本一致 */
+  score_version: number;
+  received_at: ISODateTime;
+}
+
+export type EvaluationReportInput = Omit<EvaluationReport, "score_version" | "received_at">;
+
 /* ------------------------------ 事件 ------------------------------ */
 
 export interface EventTime {

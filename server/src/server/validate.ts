@@ -37,6 +37,25 @@ export function num(source: Record<string, unknown>, field: string): number {
   return value;
 }
 
+export function nullableNum(
+  source: Record<string, unknown>,
+  field: string,
+  options: { min?: number; max?: number } = {},
+): number | null {
+  const value = source[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new HttpError("INVALID_ARGUMENT", `${field} 必须为数字或 null`);
+  }
+  if (options.min !== undefined && value < options.min) {
+    throw new HttpError("INVALID_ARGUMENT", `${field} 不能小于 ${options.min}`);
+  }
+  if (options.max !== undefined && value > options.max) {
+    throw new HttpError("INVALID_ARGUMENT", `${field} 不能大于 ${options.max}`);
+  }
+  return value;
+}
+
 export function int(
   source: Record<string, unknown>,
   field: string,
@@ -82,6 +101,13 @@ export function nullableIso(source: Record<string, unknown>, field: string): str
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") throw new HttpError("INVALID_ARGUMENT", `${field} 必须为字符串或 null`);
   return parseIso(value, field);
+}
+
+export function objArray(source: Record<string, unknown>, field: string): Record<string, unknown>[] {
+  const value = source[field];
+  if (value === undefined) throw missing(field);
+  if (!Array.isArray(value)) throw new HttpError("INVALID_ARGUMENT", `${field} 必须为对象数组`);
+  return value.map((item, index) => asObject(item, `${field}[${index}]`));
 }
 
 export function strArray(source: Record<string, unknown>, field: string): string[] {

@@ -237,3 +237,18 @@ erDiagram
 - **接口**：`POST /api/devices/register`、`POST /api/devices/{id}/heartbeat`，走设备令牌策略（请求头 `X-Device-Token`，环境变量 `HELMET_HUB_DEVICE_TOKEN`），不进入人账号角色矩阵；未配置令牌时接口放行并只告警一次，便于本地联调。
 - **策略下发**：注册与心跳响应返回 `heartbeat_interval_ms` / `offline_timeout_ms`；可用 `HELMET_HUB_HEARTBEAT_INTERVAL_MS` / `HELMET_HUB_OFFLINE_TIMEOUT_MS` 覆盖。
 - **陈旧上报**：不写 `device_status`，但仍刷新在场状态——设备是活着的，只是快照过期。
+
+## 12. 评估报告（新增，`0005_evaluation.sql`）
+
+算法侧评分输出按会话（一轮作业）版本化保存，接口 `GET/PUT /api/sessions/{id}/evaluation`。
+
+| 表 | 用途 | 关键约束 |
+| --- | --- | --- |
+| `evaluation_report` | 一轮作业的总分与计分状态 | 主键 `(session_id, score_version)`；`external_task_id` 保存算法侧作业编号（接口校验必须与 `session_id` 一致）；`scene ∈ (layer, broiler)`；`score_status ∈ (scoring_not_defined, insufficient_data, scored)`；`scored` 与 `total_score` 必须同时有或同时无 |
+| `operation_result` | 单次操作的起止时间与得分 | 主键 `(session_id, score_version, position)`；`position` 为报文数组顺序；`operation_id` 同版本内唯一；外键指向报告级联删除 |
+| `rule_result` | 每条规定的判定、违规时间与扣分 | 主键 `(session_id, score_version, operation_position, position)`；`result ∈ (compliant, noncompliant, unknown, not_applicable)`；`deducted_points >= 0`；外键指向操作级联删除；索引 `(session_id, rule_id)` 支持按规定回看 |
+
+- **版本**：服务端取 `max(会话评分版本, 已有报告版本) + 1`，报告与 `session.score` 同版本写入并进 `session_score_version`；首次导入记 `provisional` / `final`，重导记 `reanalysis`。
+- **状态映射**：`scored` + 会话运行中 → `provisional`，已结束 → `final`；`insufficient_data` / `scoring_not_defined` → `unavailable` 且 `score_value = null`。报文三值原样保留在报告表，供界面区分“计分未定义”和“数据不足”。
+- **未覆盖字段**：`rule_version` / `model_version` / `valid_event_count` / `coverage` 报文未提供，导入时沿用会话现值，不用 0 覆盖。
+- **只增不改**：`0001`–`0004` 校验和不变。

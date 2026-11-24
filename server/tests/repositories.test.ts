@@ -9,7 +9,7 @@ import {
   mockSession,
   mockUpload,
 } from "../src/contracts/mock.ts";
-import type { Command, Event, Upload } from "../src/contracts/types.ts";
+import type { Command, EvaluationReportInput, Event, Upload } from "../src/contracts/types.ts";
 import { migrate, openDatabase, StaleVersionError, ValidationError } from "../src/db/index.ts";
 import { toIso } from "../src/db/time.ts";
 import type { Db } from "../src/db/open.ts";
@@ -185,6 +185,117 @@ describe("会话评分版本", () => {
       () => repos.sessions.saveScore(sessionId, { ...mockSession.score, score_version: 1 }, "provisional"),
       StaleVersionError,
     );
+  });
+});
+
+function evaluationInput(overrides: Partial<EvaluationReportInput> = {}): EvaluationReportInput {
+  return {
+    task_id: mockSession.session_id,
+    scene: "broiler",
+    total_score: 86.5,
+    score_status: "scored",
+    operations: [
+      {
+        operation_id: "op-001",
+        start_time_seconds: 12,
+        end_time_seconds: 20,
+        score: 90,
+        rule_results: [
+          {
+            rule_id: "L01",
+            rule_name: "抓取动作规范",
+            result: "compliant",
+            violation_time_seconds: null,
+            score: 90,
+            deducted_points: 0,
+            reason: "动作完整",
+          },
+        ],
+      },
+      {
+        operation_id: "op-002",
+        start_time_seconds: 21,
+        end_time_seconds: null,
+        score: null,
+        rule_results: [
+          {
+            rule_id: "M01",
+            rule_name: "转移路径",
+            result: "noncompliant",
+            violation_time_seconds: 22,
+            score: 0,
+            deducted_points: 10,
+            reason: "跨越笼具",
+          },
+        ],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe("评估报告", () => {
+  test("导入报告追加版本并同步会话评分", () => {
+    seedDemo(repos);
+    const sessionId = mockSession.session_id;
+
+    const report = repos.evaluations.append(sessionId, evaluationInput());
+    assert.equal(report.score_version, 2);
+    assert.equal(report.operations.length, 2);
+    assert.equal(report.operations[1]?.rule_results[0]?.deducted_points, 10);
+    assert.equal(report.received_at.endsWith("Z"), true);
+
+    const session = repos.sessions.get(sessionId);
+    assert.equal(session?.score.status, "provisional");
+    assert.equal(session?.score.value, 86.5);
+    assert.equal(session?.score.rule_version, mockSession.score.rule_version);
+
+    assert.deepEqual(
+      repos.sessions.listScoreVersions(sessionId).map((v) => [
+        v.score.score_version,
+        v.score.value,
+        v.reason,
+      ]),
+      [
+        [1, 78, "initial"],
+        [2, 86.5, "provisional"],
+      ],
+    );
+  });
+
+  test("重导追加新版本，旧版仍可回查", () => {
+    seedDemo(repos);
+    const sessionId = mockSession.session_id;
+    repos.evaluations.append(sessionId, evaluationInput());
+
+    const again = repos.evaluations.append(sessionId, evaluationInput({ total_score: 80 }));
+    assert.equal(again.score_version, 3);
+    assert.equal(repos.sessions.listScoreVersions(sessionId).at(-1)?.reason, "reanalysis");
+    assert.equal(repos.evaluations.get(sessionId, 2)?.total_score, 86.5);
+    assert.equal(repos.evaluations.get(sessionId)?.total_score, 80);
+  });
+
+  test("数据不足映射 unavailable，结束后 scored 映射 final", () => {
+    seedDemo(repos);
+    const sessionId = mockSession.session_id;
+
+    const insufficient = repos.evaluations.append(
+      sessionId,
+      evaluationInput({ score_status: "insufficient_data", total_score: null }),
+    );
+    assert.equal(insufficient.total_score, null);
+    assert.equal(repos.sessions.get(sessionId)?.score.status, "unavailable");
+    assert.equal(repos.sessions.get(sessionId)?.score.value, null);
+
+    repos.sessions.end(sessionId, "ended", "2026-11-18T11:00:00Z");
+    repos.evaluations.append(sessionId, evaluationInput());
+    assert.equal(repos.sessions.get(sessionId)?.score.status, "final");
+  });
+
+  test("报告不存在返回 null，未知会话被拒绝", () => {
+    seedDemo(repos);
+    assert.equal(repos.evaluations.get(mockSession.session_id), null);
+    assert.throws(() => repos.evaluations.append("sess-nope", evaluationInput()), /不存在/);
   });
 });
 

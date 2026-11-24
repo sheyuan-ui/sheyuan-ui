@@ -2,6 +2,7 @@ import type { Db } from "../db/open.ts";
 import { AuditRepository } from "./audit.ts";
 import { CommandRepository } from "./commands.ts";
 import { DeviceRepository } from "./devices.ts";
+import { EvaluationRepository } from "./evaluations.ts";
 import { EventRepository } from "./events.ts";
 import { IdempotencyRepository } from "./idempotency.ts";
 import { JobRepository } from "./jobs.ts";
@@ -19,6 +20,7 @@ export {
   type PairCodeResult,
   type PairStatus,
 } from "./devices.ts";
+export { EvaluationRepository } from "./evaluations.ts";
 export { EventRepository } from "./events.ts";
 export { IdempotencyRepository, type IdempotencyReservation } from "./idempotency.ts";
 export { JobRepository, type JobFilter } from "./jobs.ts";
@@ -42,6 +44,7 @@ export interface Repositories {
   presence: PresenceRepository;
   jobs: JobRepository;
   sessions: SessionRepository;
+  evaluations: EvaluationRepository;
   events: EventRepository;
   commands: CommandRepository;
   uploads: UploadRepository;
@@ -52,11 +55,13 @@ export interface Repositories {
 }
 
 export function createRepositories(db: Db): Repositories {
+  const sessions = new SessionRepository(db);
   return {
     devices: new DeviceRepository(db),
     presence: new PresenceRepository(db),
     jobs: new JobRepository(db),
-    sessions: new SessionRepository(db),
+    sessions,
+    evaluations: new EvaluationRepository(db, sessions),
     events: new EventRepository(db),
     commands: new CommandRepository(db),
     uploads: new UploadRepository(db),

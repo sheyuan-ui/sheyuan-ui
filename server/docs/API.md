@@ -69,6 +69,8 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | GET | `/api/sessions` | 会话分页列表，支持 `job_id` / `device_id` / `status` / 开始时间过滤 |
 | GET | `/api/sessions/{id}` | 会话详情 |
 | GET | `/api/sessions/{id}/events` | 会话内事件，按 `device_monotonic_ms` 排序 |
+| GET | `/api/sessions/{id}/evaluation?version=` | 评估报告，默认最新版；无报告 404 |
+| PUT | `/api/sessions/{id}/evaluation` | 导入算法评分报告，追加版本并同步会话评分 |
 | POST | `/api/events/{id}/review` | 人工复核，只改 `review_*` 并留痕 |
 | POST | `/api/commands` | 下发指令，201；版本不一致 409 |
 | GET | `/api/commands/{id}` | 指令详情与执行结果 |
@@ -93,7 +95,7 @@ npm run serve   # 默认 http://0.0.0.0:8080
 - 同一键正在处理 → 409 `CONFLICT`，客户端稍后重试；
 - 处理失败时释放占位，允许用同一键重试。
 
-幂等作用域按业务拆分（`jobs.create`、`commands.create`、`uploads.chunk` 等），
+幂等作用域按业务拆分（`jobs.create`、`commands.create`、`evaluations.import`、`uploads.chunk` 等），
 不同接口可复用同一个键值而不互相干扰。键默认保留 24 小时。
 
 分块请求的指纹由 `文件 ID + chunk_index + Content-Length` 组成；
@@ -112,7 +114,11 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | 分块越界或超过 `chunk_size` | 400 / 413 |
 | 完成时仍有分块缺失 | 409，`details.missing_chunks` |
 | 本地文件 SHA-256 与声明不一致 | 422 `UPLOAD_HASH_MISMATCH`，状态置 `failed` |
-| 任务/会话/事件不存在 | 404 |
+| 评估报告 `task_id` 与路径会话 ID 不一致 | 400 |
+| 评估报告 `scene` 与任务场景不一致 | 400 |
+| `score_status=scored` 但 `total_score` 为空（或反之） | 400 |
+| 评估报告违规时间落在操作区间外、操作时间倒序 | 400 |
+| 任务/会话/事件/评估报告不存在 | 404 |
 
 时间入参必须是 ISO 8601；入库统一规范为 `YYYY-MM-DDTHH:mm:ss.sssZ`。
 未知值用 `null`，接口不会用 0 或空串顶替。
@@ -186,7 +192,7 @@ npm run serve   # 默认 http://0.0.0.0:8080
 
 **认证事件审计**（`audit_log.action`）：`auth.login`、`auth.login_failed`、`auth.login_rejected`、
 `auth.refresh`、`auth.refresh_reuse`、`auth.logout`、`auth.unauthenticated`、`auth.forbidden`。
-业务写接口（指令下发、配对、事件复核）的 `actor_id` / `actor_role` 由验签身份注入，
+业务写接口（指令下发、配对、事件复核、评估导入 `evaluation.import`）的 `actor_id` / `actor_role` 由验签身份注入，
 演示占位 `X-Actor-Id` 只在未开启鉴权时回落到请求头。
 
 **建账号**：`npm run user -- create <用户名> <viewer|operator|admin>`，不传 `--password` 时生成随机口令并打印一次。

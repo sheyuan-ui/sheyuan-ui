@@ -38,6 +38,60 @@ function postJson(path: string, payload: unknown, key?: string, headers: Record<
   });
 }
 
+function putJson(path: string, payload: unknown, key?: string) {
+  return call(path, {
+    method: "PUT",
+    headers: jsonHeaders(key === undefined ? {} : { "idempotency-key": key }),
+    body: JSON.stringify(payload),
+  });
+}
+
+function evaluationPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    task_id: DEMO_IDS.session,
+    scene: "broiler",
+    total_score: 86.5,
+    score_status: "scored",
+    operations: [
+      {
+        operation_id: "op-001",
+        start_time_seconds: 12,
+        end_time_seconds: 20,
+        score: 90,
+        rule_results: [
+          {
+            rule_id: "L01",
+            rule_name: "抓取动作规范",
+            result: "compliant",
+            violation_time_seconds: null,
+            score: 90,
+            deducted_points: 0,
+            reason: "动作完整",
+          },
+        ],
+      },
+      {
+        operation_id: "op-002",
+        start_time_seconds: 21,
+        end_time_seconds: null,
+        score: null,
+        rule_results: [
+          {
+            rule_id: "M01",
+            rule_name: "转移路径",
+            result: "noncompliant",
+            violation_time_seconds: 22,
+            score: 0,
+            deducted_points: 10,
+            reason: "跨越笼具",
+          },
+        ],
+      },
+    ],
+    ...overrides,
+  };
+}
+
 function waitForMessage(
   socket: WebSocket,
   predicate: (message: Record<string, unknown>) => boolean,
@@ -252,6 +306,81 @@ describe("会话与事件复核", () => {
       "event-review-missing",
     );
     assert.equal(missing.status, 404);
+  });
+});
+
+describe("评估报告", () => {
+  test("导入后可按会话与版本查询，同键重放返回同一版本", async () => {
+    const path = `/api/sessions/${DEMO_IDS.session}/evaluation`;
+    const first = await putJson(path, evaluationPayload(), "evaluation-import-1");
+    assert.equal(first.status, 200);
+
+    const report = first.body.data as {
+      score_version: number;
+      total_score: number;
+      operations: { operation_id: string; rule_results: { deducted_points: number }[] }[];
+    };
+    assert.equal(report.score_version, 2);
+    assert.equal(report.total_score, 86.5);
+    assert.equal(report.operations.length, 2);
+    assert.equal(report.operations[1]?.rule_results[0]?.deducted_points, 10);
+
+    const replay = await putJson(path, evaluationPayload(), "evaluation-import-1");
+    assert.deepEqual(replay.body.data, first.body.data);
+
+    const fetched = await call(path);
+    assert.equal(fetched.status, 200);
+    assert.deepEqual(fetched.body.data, first.body.data);
+
+    const byVersion = await call(`${path}?version=2`);
+    assert.equal(byVersion.status, 200);
+    assert.equal((byVersion.body.data as { score_version: number }).score_version, 2);
+
+    const missingVersion = await call(`${path}?version=99`);
+    assert.equal(missingVersion.status, 404);
+
+    const stored = createRepositories(db).sessions.get(DEMO_IDS.session);
+    assert.equal(stored?.score.status, "provisional");
+    assert.equal(stored?.score.value, 86.5);
+
+    const audit = createRepositories(db).audit.listByTarget("session", DEMO_IDS.session);
+    assert.ok(audit.some((entry) => entry.action === "evaluation.import"));
+  });
+
+  test("重导追加新版本，默认读最新", async () => {
+    const path = `/api/sessions/${DEMO_IDS.session}/evaluation`;
+    const second = await putJson(path, evaluationPayload({ total_score: 80 }), "evaluation-import-2");
+    assert.equal(second.status, 200);
+    assert.equal((second.body.data as { score_version: number }).score_version, 3);
+
+    const latest = await call(path);
+    assert.equal((latest.body.data as { total_score: number }).total_score, 80);
+    const old = await call(`${path}?version=2`);
+    assert.equal((old.body.data as { total_score: number }).total_score, 86.5);
+  });
+
+  test("task_id、scene、分数一致性不对都拒绝", async () => {
+    const path = `/api/sessions/${DEMO_IDS.session}/evaluation`;
+
+    const badTask = await putJson(path, evaluationPayload({ task_id: "sess-other" }), "evaluation-bad-1");
+    assert.equal(badTask.status, 400);
+    assert.equal(badTask.body.code, "INVALID_ARGUMENT");
+
+    const badScene = await putJson(path, evaluationPayload({ scene: "layer" }), "evaluation-bad-2");
+    assert.equal(badScene.status, 400);
+
+    const badTotal = await putJson(path, evaluationPayload({ total_score: null }), "evaluation-bad-3");
+    assert.equal(badTotal.status, 400);
+
+    const noKey = await putJson(path, evaluationPayload());
+    assert.equal(noKey.status, 400);
+
+    const missingSession = await putJson(
+      "/api/sessions/sess-missing/evaluation",
+      evaluationPayload({ task_id: "sess-missing" }),
+      "evaluation-bad-4",
+    );
+    assert.equal(missingSession.status, 404);
   });
 });
 

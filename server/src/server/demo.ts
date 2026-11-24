@@ -1,6 +1,7 @@
 /**
- * 自带验证页：GET / 返回。只用于人工验收新接口行为，不属于 T02 契约。
- * 页面 JS 不使用模板字符串，避免与本文件的模板字面量冲突。
+ * 自带验收台：GET / 返回。用于人工验证接口行为（登录、三角色边界、指令、上传等），
+ * 不属于 T02 契约；正式前端是仓库根目录的 React 应用。
+ * 整个页面是一个模板字面量，页面 JS 不使用反引号与 ${}，避免提前截断外层字符串。
  */
 export const DEMO_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -20,6 +21,7 @@ export const DEMO_HTML = `<!doctype html>
   button { font-size: 12px; padding: 4px 10px; margin-right: 6px; border: 1px solid #c6ccd6; border-radius: 6px; background: #fff; cursor: pointer; }
   button:hover { background: #eef2f7; }
   button.primary { background: #14213d; color: #fff; border-color: #14213d; }
+  input { font-size: 12px; padding: 4px 8px; margin-right: 6px; border: 1px solid #c6ccd6; border-radius: 6px; }
   .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #eef0f3; }
   .tag.ok { background: #e2f4e8; color: #1d7a3d; }
   .tag.warn { background: #fdf0dc; color: #9a6a12; }
@@ -33,6 +35,15 @@ export const DEMO_HTML = `<!doctype html>
 <body>
 <header>helmet-hub 验证台 · 亲眼看到接口层的变化</header>
 <main>
+  <section id="authbar">
+    <h2>登录</h2>
+    <p>
+      <input id="username" value="admin1" autocomplete="username" style="width:120px">
+      <input id="password" type="password" placeholder="口令" autocomplete="current-password" style="width:160px">
+      <button class="primary" id="login">登录</button>
+      <span class="muted" id="auth-status">未登录：接口会返回 401（演示账号 admin1 / operator1 / viewer1）</span>
+    </p>
+  </section>
   <section>
     <h2>设备与指令（乐观锁）</h2>
     <table id="devices"></table>
@@ -72,6 +83,18 @@ var SHA = '0c1051e1fe95ec4d7a6fa588d104ebb638da68a92030a9c4936a00bb02cbd3ee';
 var CHUNK = 8;
 var state = { version: 0, device: null, session: null, upload: null };
 var socket = null;
+var authToken = sessionStorage.getItem('helmet.demo.token');
+
+function authHeaders() {
+  return authToken ? { authorization: 'Bearer ' + authToken } : {};
+}
+function setAuth(text) {
+  document.getElementById('auth-status').textContent = text;
+}
+function clearAuth() {
+  authToken = null;
+  sessionStorage.removeItem('helmet.demo.token');
+}
 
 function esc(v) {
   return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
@@ -86,7 +109,7 @@ function tag(text, kind) {
   return '<span class="tag ' + (kind || '') + '">' + esc(text) + '</span>';
 }
 async function api(path, method, body, key, extra) {
-  var headers = Object.assign({ 'content-type': 'application/json' }, extra || {});
+  var headers = Object.assign({ 'content-type': 'application/json' }, extra || {}, authHeaders());
   if (key) headers['idempotency-key'] = key;
   var res = await fetch(path, {
     method: method || 'GET',
@@ -96,6 +119,10 @@ async function api(path, method, body, key, extra) {
   var json = await res.json();
   log((method || 'GET') + ' ' + path + ' -> ' + res.status +
       (json.code ? ' ' + json.code : '') + '  req=' + String(json.request_id).slice(0, 8));
+  if (res.status === 401 && path !== '/api/auth/login') {
+    clearAuth();
+    setAuth('未登录或登录已过期：请在顶部重新登录');
+  }
   return { status: res.status, body: json };
 }
 
@@ -197,7 +224,7 @@ document.getElementById('upload').addEventListener('click', async function () {
     var part = CONTENT.slice(i * CHUNK, (i + 1) * CHUNK);
     var res = await fetch('/api/uploads/' + fileId + '/chunks?chunk_index=' + i, {
       method: 'POST',
-      headers: { 'content-type': 'application/octet-stream', 'idempotency-key': 'demo-chunk-' + fileId + '-' + i },
+      headers: Object.assign({ 'content-type': 'application/octet-stream', 'idempotency-key': 'demo-chunk-' + fileId + '-' + i }, authHeaders()),
       body: part
     });
     var json = await res.json();
@@ -210,7 +237,37 @@ document.getElementById('upload').addEventListener('click', async function () {
 });
 
 connectWs();
-load();
+
+async function login() {
+  var u = document.getElementById('username').value.trim();
+  var p = document.getElementById('password').value;
+  if (!u || !p) { setAuth('请输入账号和口令'); return; }
+  var res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: u, password: p })
+  });
+  var json = await res.json();
+  log('POST /api/auth/login -> ' + res.status + (json.code ? ' ' + json.code : '') +
+      '  req=' + String(json.request_id).slice(0, 8));
+  if (res.status !== 200) { setAuth('登录失败：' + (json.message || json.code)); return; }
+  authToken = json.data.access_token;
+  sessionStorage.setItem('helmet.demo.token', authToken);
+  document.getElementById('password').value = '';
+  setAuth('已登录：' + json.data.user.display_name + '（' + json.data.user.role + '）');
+  await load();
+}
+document.getElementById('login').addEventListener('click', login);
+document.getElementById('password').addEventListener('keydown', function (ev) {
+  if (ev.key === 'Enter') login();
+});
+
+if (authToken) {
+  setAuth('已使用上次的访问令牌，过期后请重新登录');
+  load();
+} else {
+  setAuth('未登录：输入账号口令后点登录');
+}
 </script>
 </body>
 </html>
