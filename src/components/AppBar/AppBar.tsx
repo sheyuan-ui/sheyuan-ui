@@ -1,8 +1,9 @@
-import { Avatar, IconButton, Menu, MenuItem, Tooltip, Divider, Button } from "@mui/material";
+import { Menu, MenuItem, Button } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import { useState } from "react";
 import { HUD } from "../../theme/theme";
-import { ChevronDownIcon, SettingsIcon } from "../icons";
+import type { Role } from "../../api";
+import { ChevronDownIcon } from "../icons";
 
 const AppBarContainer = styled("div")(({ theme }) => ({
   display: "flex",
@@ -153,7 +154,44 @@ const CurrentCheck = styled("span")({
   color: HUD.cyan,
 });
 
-type Page = "main" | "config" | "task";
+const ROLE_LABEL: Record<Role, string> = {
+  viewer: "viewer（查看）",
+  operator: "operator（操作）",
+  admin: "admin（管理）",
+};
+
+const AccountSwitch = styled("button")({
+  height: 26,
+  padding: "0 12px",
+  border: "1px solid rgba(63, 178, 255, 0.45)",
+  borderRadius: 5,
+  background: HUD.cyanDim,
+  color: "#ffffff",
+  font: "inherit",
+  fontSize: 12,
+  letterSpacing: 0.3,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  flexShrink: 0,
+  transition: "background-color 160ms ease, border-color 160ms ease",
+  "&:hover": {
+    backgroundColor: "#2480c2",
+    borderColor: "rgba(63, 178, 255, 0.7)",
+  },
+});
+
+const RoleTag = styled("span")({
+  padding: "1px 7px",
+  borderRadius: 5,
+  border: `1px solid ${HUD.lineSoft}`,
+  fontSize: 10.5,
+  letterSpacing: 0.3,
+  color: HUD.textDim,
+  whiteSpace: "nowrap",
+  flexShrink: 0,
+});
+
+type Page = "main" | "config" | "pair" | "task" | "settings";
 
 interface AppBarDevice {
   id: string;
@@ -163,9 +201,8 @@ interface AppBarDevice {
 }
 
 interface AppBarProps {
-  loggedInUser: string;
+  role: Role;
   onLogout: () => void;
-  onMenuAction: (action: string) => void;
   page: Page;
   onNavigate: (page: Page) => void;
   /** 在线且已配对的设备 */
@@ -175,16 +212,14 @@ interface AppBarProps {
 }
 
 export default function AppBar({
-  loggedInUser,
+  role,
   onLogout,
-  onMenuAction,
   page,
   onNavigate,
   devices,
   activeDeviceId,
   onSelectDevice,
 }: AppBarProps) {
-  const [userMenuEl, setUserMenuEl] = useState<null | HTMLElement>(null);
   const [deviceMenuEl, setDeviceMenuEl] = useState<null | HTMLElement>(null);
 
   return (
@@ -203,12 +238,28 @@ export default function AppBar({
           >
             设备信息
           </MenuBarButton>
+          {(role === "operator" || role === "admin") && (
+            <MenuBarButton
+              className={page === "pair" ? "is-active" : undefined}
+              onClick={() => onNavigate("pair")}
+            >
+              设备配对
+            </MenuBarButton>
+          )}
           <MenuBarButton
             className={page === "task" ? "is-active" : undefined}
             onClick={() => onNavigate("task")}
           >
             任务信息
           </MenuBarButton>
+          {role === "admin" && (
+            <MenuBarButton
+              className={page === "settings" ? "is-active" : undefined}
+              onClick={() => onNavigate("settings")}
+            >
+              设置
+            </MenuBarButton>
+          )}
         </StartSection>
 
         <MiddleSection>
@@ -312,54 +363,10 @@ export default function AppBar({
         </MiddleSection>
 
         <EndSection>
-          <Tooltip title="个人资料">
-            <IconButton
-              onClick={(e) => setUserMenuEl(e.currentTarget)}
-              sx={{
-                padding: "3px",
-                borderRadius: 6,
-                transition: "background-color 160ms ease",
-                "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.05)" },
-              }}
-            >
-              <Avatar
-                variant="rounded"
-                sx={{
-                  height: 24,
-                  width: 24,
-                  borderRadius: "6px",
-                  bgcolor: HUD.cyanDim,
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: "#fff",
-                }}
-              >
-                {loggedInUser.charAt(0).toUpperCase()}
-              </Avatar>
-            </IconButton>
-          </Tooltip>
-          <Menu
-            anchorEl={userMenuEl}
-            open={Boolean(userMenuEl)}
-            onClose={() => setUserMenuEl(null)}
-          >
-            <MenuItem disabled sx={{ fontSize: 12, color: HUD.textDim, minHeight: 32 }}>
-              {loggedInUser}
-            </MenuItem>
-            <Divider />
-            <MenuItem onClick={() => { onMenuAction("设置"); setUserMenuEl(null); }}>
-              <SettingsIcon style={{ marginRight: 8, fontSize: 16 }} />
-              设置
-            </MenuItem>
-            <MenuItem onClick={() => { onMenuAction("关于 SHEYUAN TECH"); setUserMenuEl(null); }}>关于</MenuItem>
-            <Divider />
-            <MenuItem
-              onClick={() => { onLogout(); setUserMenuEl(null); }}
-              sx={{ color: HUD.danger }}
-            >
-              退出登录
-            </MenuItem>
-          </Menu>
+          <AccountSwitch type="button" onClick={onLogout}>
+            切换账号
+          </AccountSwitch>
+          <RoleTag>{ROLE_LABEL[role]}</RoleTag>
         </EndSection>
       </ToolbarGrid>
     </AppBarContainer>

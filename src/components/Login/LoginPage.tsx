@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { Box, Button, Dialog, DialogContent, IconButton, Typography } from "@mui/material";
+import { useState } from "react";
+import type { FormEvent } from "react";
+import { Box, Button, IconButton, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
-import { CloseIcon, VisibilityIcon, VisibilityOffIcon } from "../icons";
+import { VisibilityIcon, VisibilityOffIcon } from "../icons";
+import { authApi, type AuthUser } from "../../api";
 
 const BLUE = "#4a9ee6";
 const GRAY = "#9a9a9a";
@@ -16,7 +18,7 @@ const Page = styled(Box)({
   backgroundColor: "#ffffff",
 });
 
-const FormColumn = styled(Box)({
+const Card = styled(Box)({
   width: "min(440px, 82vw)",
   display: "flex",
   flexDirection: "column",
@@ -88,67 +90,10 @@ const PillButton = styled(Button)({
   },
 });
 
-const SolidPillButton = styled(Button)({
-  height: 40,
-  borderRadius: 20,
-  backgroundColor: BLUE,
-  color: "#ffffff",
-  fontSize: 14,
-  textTransform: "none",
-  padding: "0 20px",
-  flexShrink: 0,
-  "&:hover": {
-    backgroundColor: "#3d8dd4",
-  },
-  "&.Mui-disabled": {
-    backgroundColor: "#cfe3f5",
-    color: "#ffffff",
-  },
-});
-
-const LinkText = styled(Typography)({
-  fontSize: 15,
-  color: "#6b6b6b",
-  cursor: "pointer",
-  "&:hover": {
-    color: BLUE,
-  },
-});
-
 const ErrorText = styled(Typography)({
   fontSize: 13,
   color: "#f54966",
   minHeight: 18,
-  marginTop: 16,
-});
-
-const ModalPage = styled(Box)({
-  position: "relative",
-  height: "100vh",
-  width: "100vw",
-  backgroundColor: "#ffffff",
-  display: "flex",
-  flexDirection: "column",
-  justifyContent: "center",
-});
-
-const ModalTitle = styled(Typography)({
-  fontSize: 34,
-  fontWeight: 700,
-  color: "#393939",
-  marginBottom: 72,
-});
-
-const CloseButton = styled(IconButton)({
-  position: "absolute",
-  top: 24,
-  right: 32,
-  color: "#393939",
-});
-
-const ModalBody = styled(Box)({
-  width: "min(760px, 84vw)",
-  margin: "0 auto",
 });
 
 function UserIcon() {
@@ -168,86 +113,23 @@ function LockIcon() {
 }
 
 interface LoginPageProps {
-  onLogin: (username: string) => void;
+  onLogin: (user: AuthUser) => void;
+  /** 会话过期等提示，展示在错误行下方 */
+  notice?: string;
 }
 
-type ModalKind = "forgot" | "register" | null;
-
-const COUNTDOWN_SECONDS = 60;
-
-function VerifyCodeField({
-  value,
-  onChange,
-  error,
-  onSubmit,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  error: string;
-  onSubmit: () => void;
-}) {
-  const [secondsLeft, setSecondsLeft] = useState(0);
-  const timer = useRef<number | undefined>(undefined);
-
-  useEffect(() => {
-    return () => window.clearInterval(timer.current);
-  }, []);
-
-  const sendCode = () => {
-    if (secondsLeft > 0) return;
-    setSecondsLeft(COUNTDOWN_SECONDS);
-    window.clearInterval(timer.current);
-    timer.current = window.setInterval(() => {
-      setSecondsLeft((s) => {
-        if (s <= 1) window.clearInterval(timer.current);
-        return s - 1;
-      });
-    }, 1000);
-  };
-
-  return (
-    <Box>
-      <FieldRow>
-        <NativeInput
-          placeholder="请输入验证码"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onSubmit();
-          }}
-        />
-        <SolidPillButton onClick={sendCode} disabled={secondsLeft > 0}>
-          {secondsLeft > 0 ? `${secondsLeft}s 后重发` : "获取验证码"}
-        </SolidPillButton>
-      </FieldRow>
-      {error && <ErrorText>{error}</ErrorText>}
-    </Box>
-  );
-}
-
-export default function LoginPage({ onLogin }: LoginPageProps) {
+export default function LoginPage({ onLogin, notice }: LoginPageProps) {
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [modal, setModal] = useState<ModalKind>(null);
 
-  const [resetAccount, setResetAccount] = useState("");
-  const [resetCode, setResetCode] = useState("");
-  const [resetPassword, setResetPassword] = useState("");
-  const [resetError, setResetError] = useState("");
-
-  const [registerAccount, setRegisterAccount] = useState("");
-  const [registerCode, setRegisterCode] = useState("");
-  const [registerPassword, setRegisterPassword] = useState("");
-  const [registerError, setRegisterError] = useState("");
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
     if (!account.trim()) {
-      setError("请输入邮箱或是手机号");
+      setError("请输入账号");
       return;
     }
     if (!password.trim()) {
@@ -255,75 +137,19 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
       return;
     }
     setLoading(true);
-    setTimeout(() => {
+    try {
+      const user = await authApi.login(account.trim(), password);
+      onLogin(user);
+    } catch {
+      setError("账号或密码不正确");
+    } finally {
       setLoading(false);
-      onLogin(account.trim());
-    }, 600);
-  };
-
-  const openModal = (kind: Exclude<ModalKind, null>) => {
-    setResetError("");
-    setRegisterError("");
-    setModal(kind);
-  };
-
-  const closeModal = () => {
-    setModal(null);
-    setResetAccount("");
-    setResetCode("");
-    setResetPassword("");
-    setRegisterAccount("");
-    setRegisterCode("");
-    setRegisterPassword("");
-  };
-
-  const handleReset = () => {
-    setResetError("");
-    if (!resetAccount.trim()) {
-      setResetError("请输入邮箱或是手机号");
-      return;
     }
-    if (!resetCode.trim()) {
-      setResetError("请输入验证码");
-      return;
-    }
-    if (!resetPassword.trim()) {
-      setResetError("请输入新密码");
-      return;
-    }
-    closeModal();
-    setError("");
-    setAccount(resetAccount.trim());
-  };
-
-  const handleRegister = () => {
-    setRegisterError("");
-    if (!registerAccount.trim()) {
-      setRegisterError("请输入邮箱或是手机号");
-      return;
-    }
-    if (!registerCode.trim()) {
-      setRegisterError("请输入验证码");
-      return;
-    }
-    if (!registerPassword.trim()) {
-      setRegisterError("请输入新密码");
-      return;
-    }
-    closeModal();
-    setError("");
-    setAccount(registerAccount.trim());
-    setPassword(registerPassword.trim());
-  };
-
-  const submitModal = () => {
-    if (modal === "register") handleRegister();
-    else handleReset();
   };
 
   return (
     <Page>
-      <FormColumn>
+      <Card>
         <Brand>SHEYUAN TECH</Brand>
         <Box component="form" onSubmit={handleSubmit} sx={{ display: "flex", flexDirection: "column", gap: 5 }}>
           <FieldRow>
@@ -331,7 +157,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
               <UserIcon />
             </FieldIcon>
             <NativeInput
-              placeholder="请输入邮箱或是手机号"
+              placeholder="请输入账号"
               value={account}
               onChange={(e) => setAccount(e.target.value)}
               autoComplete="username"
@@ -364,84 +190,18 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
           </PillButton>
         </Box>
 
-        <ErrorText>{error}</ErrorText>
-
-        <Box sx={{ display: "flex", justifyContent: "space-between", mt: 2 }}>
-          <LinkText onClick={() => openModal("forgot")}>忘记密码</LinkText>
-          <LinkText onClick={() => openModal("register")}>注册账号</LinkText>
+        <Box sx={{ minHeight: 18, mt: 2 }}>
+          {error ? (
+            <ErrorText sx={{ mt: 0 }}>{error}</ErrorText>
+          ) : notice ? (
+            <Typography sx={{ fontSize: 13, color: "#6b6b6b" }}>{notice}</Typography>
+          ) : null}
         </Box>
-      </FormColumn>
 
-      <Dialog
-        fullScreen
-        open={modal !== null}
-        onClose={closeModal}
-        slotProps={{ paper: { sx: { m: 0, backgroundColor: "#ffffff" } } }}
-      >
-        <DialogContent sx={{ p: 0 }}>
-          <ModalPage>
-            <CloseButton onClick={closeModal} aria-label="关闭">
-              <CloseIcon />
-            </CloseButton>
-            <ModalBody>
-              <ModalTitle>{modal === "register" ? "注册" : "忘记密码"}</ModalTitle>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                <Box>
-                  <FieldRow>
-                    <NativeInput
-                      placeholder="请输入邮箱或是手机号"
-                      value={modal === "register" ? registerAccount : resetAccount}
-                      onChange={(e) =>
-                        modal === "register"
-                          ? setRegisterAccount(e.target.value)
-                          : setResetAccount(e.target.value)
-                      }
-                    />
-                  </FieldRow>
-                </Box>
-
-                <VerifyCodeField
-                  key={modal ?? "none"}
-                  value={modal === "register" ? registerCode : resetCode}
-                  onChange={modal === "register" ? setRegisterCode : setResetCode}
-                  error=""
-                  onSubmit={submitModal}
-                />
-
-                <FieldRow>
-                  <NativeInput
-                    placeholder="请输入新密码"
-                    type="password"
-                    value={modal === "register" ? registerPassword : resetPassword}
-                    onChange={(e) =>
-                      modal === "register"
-                        ? setRegisterPassword(e.target.value)
-                        : setResetPassword(e.target.value)
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") submitModal();
-                    }}
-                  />
-                </FieldRow>
-
-                {(modal === "register" ? registerError : resetError) && (
-                  <ErrorText sx={{ mt: 0 }}>
-                    {modal === "register" ? registerError : resetError}
-                  </ErrorText>
-                )}
-
-                <PillButton
-                  fullWidth
-                  sx={{ mt: 6 }}
-                  onClick={submitModal}
-                >
-                  {modal === "register" ? "注册" : "确定"}
-                </PillButton>
-              </Box>
-            </ModalBody>
-          </ModalPage>
-        </DialogContent>
-      </Dialog>
+        <Typography sx={{ fontSize: 12, color: GRAY, textAlign: "center", mt: 1.5 }}>
+          账号由管理员开设，系统不开放注册
+        </Typography>
+      </Card>
     </Page>
   );
 }
