@@ -51,6 +51,33 @@ export interface DeviceStatus {
   state_version: number;
 }
 
+/**
+ * 设备四态（T07）：运行中/在线/离线/故障。
+ * 由 DeviceStatus + 服务端在场状态实时派生，不入库；
+ * 离线优先于故障，避免用过期快照误报故障。
+ */
+export type DeviceRuntimeState = "running" | "online" | "offline" | "fault";
+
+export type DeviceStateReason =
+  | "task_active"
+  | "idle"
+  | "heartbeat_timeout"
+  | "never_seen"
+  | "device_error"
+  | "hub_unreachable";
+
+export interface DeviceRuntimeView {
+  state: DeviceRuntimeState;
+  reason: DeviceStateReason;
+  online: boolean;
+  /** 最后一次收到心跳的时刻（服务端时钟） */
+  last_seen: ISODateTime | null;
+  /** 本次离线起点；在线为 null */
+  offline_since: ISODateTime | null;
+  /** 已离线时长（毫秒）；在线或从未上报为 null */
+  offline_ms: number | null;
+}
+
 /* ------------------------------ 任务 ------------------------------ */
 
 export type Scenario = "broiler" | "layer";

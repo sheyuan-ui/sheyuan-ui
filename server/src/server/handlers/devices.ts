@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import { API, WS_TOPICS } from "../../contracts/api.ts";
 import type { DeviceStatus, DeviceTaskState, WifiStatus } from "../../contracts/types.ts";
 import { nowIso } from "../../db/time.ts";
+import { deriveDeviceState } from "../../device/state.ts";
 import type { Repositories } from "../../repos/index.ts";
 import { readJsonBody } from "../body.ts";
 import type { DeviceSummary } from "../dto.ts";
@@ -11,14 +12,22 @@ import { queryInt } from "../query.ts";
 import type { Router } from "../router.ts";
 import { asObject, bool, enumOf, int, isoStr, nullableStr, str } from "../validate.ts";
 
-function summaries(repos: Repositories): DeviceSummary[] {
+function summaries(repos: Repositories, now: string = nowIso()): DeviceSummary[] {
   const statuses = new Map(repos.devices.listStatuses().map((status) => [status.device_id, status]));
-  return repos.devices.listDevices().map((device) => ({
-    device_id: device.device_id,
-    alias: device.alias,
-    pair_status: device.pair_status,
-    status: statuses.get(device.device_id) ?? null,
-  }));
+  return repos.devices.listDevices().map((device) => {
+    const status = statuses.get(device.device_id) ?? null;
+    return {
+      device_id: device.device_id,
+      alias: device.alias,
+      pair_status: device.pair_status,
+      status,
+      runtime: deriveDeviceState({
+        status,
+        presence: repos.presence.get(device.device_id),
+        now,
+      }),
+    };
+  });
 }
 
 const DEVICE_TASK_STATES: readonly DeviceTaskState[] = [
@@ -104,10 +113,16 @@ export function registerDeviceRoutes(router: Router): void {
     });
     const { presence, cameOnline } = ctx.repos.presence.markSeen(deviceId);
     if (cameOnline) {
+      const runtime = deriveDeviceState({
+        status: ctx.repos.devices.getStatus(deviceId),
+        presence,
+      });
       ctx.hub.publish(WS_TOPICS.deviceStatus, {
         device_id: deviceId,
         online: true,
         last_seen: presence.last_seen,
+        state: runtime.state,
+        state_reason: runtime.reason,
       });
     }
     ctx.repos.audit.append({
@@ -170,16 +185,19 @@ export function registerDeviceRoutes(router: Router): void {
     // 陈旧 state_version 不写库，但仍算设备活着：在场状态始终刷新
     const accepted = ctx.repos.devices.upsertStatus(status);
     const { presence, cameOnline } = ctx.repos.presence.markSeen(deviceId);
+    const current = ctx.repos.devices.getStatus(deviceId);
     if (cameOnline) {
+      const runtime = deriveDeviceState({ status: current, presence });
       ctx.hub.publish(WS_TOPICS.deviceStatus, {
         device_id: deviceId,
         online: true,
         last_seen: presence.last_seen,
-        task_state: status.task_state,
+        task_state: current?.task_state ?? status.task_state,
+        state: runtime.state,
+        state_reason: runtime.reason,
       });
     }
 
-    const current = ctx.repos.devices.getStatus(deviceId);
     return {
       status: 200,
       data: {

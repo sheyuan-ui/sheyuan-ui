@@ -11,6 +11,9 @@ export interface OfflineEvent {
   online: false;
   last_seen: string;
   offline_since: string;
+  /** 四态派生（T07）：心跳超时判定必然是离线 */
+  state: "offline";
+  state_reason: "heartbeat_timeout";
 }
 
 export interface OfflineSweeperOptions {
@@ -29,8 +32,8 @@ export interface OfflineSweeper {
 }
 
 /**
- * 心跳超时判定：只改在场状态并推送 device.status，
- * 四态（运行中/在线/离线/故障）的派生与展示归 T07。
+ * 心跳超时判定：改在场状态并推送 device.status（带四态离线标记）。
+ * 完整四态派生见 device/state.ts（T07）。
  */
 export function createOfflineSweeper(
   repos: Repositories,
@@ -56,6 +59,8 @@ export function createOfflineSweeper(
         online: false,
         last_seen: presence.last_seen,
         offline_since: presence.offline_since ?? presence.updated_at,
+        state: "offline",
+        state_reason: "heartbeat_timeout",
       };
       hub.publish(WS_TOPICS.deviceStatus, event);
       events.push(event);
