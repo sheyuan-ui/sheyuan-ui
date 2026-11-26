@@ -191,6 +191,51 @@ ws://<现场机器 IP>:8080/ws
 | Upload | file_id、owner_id、job_id、session_id、kind、size_bytes、sha256、progress、status、cloud_receipt、attempts、last_error |
 | EvaluationReport | task_id、scene、total_score、score_status、operations[]、score_version、received_at |
 
+### 4.5 评估报告（EvaluationReport / EvaluationReportInput）
+
+算法侧每轮作业输出一份评分结果，按 `score_version` 留档。`PUT /api/sessions/:id/evaluation` 的请求体为 `EvaluationReportInput`；`GET` / `PUT` 返回的 `EvaluationReport` 在此基础上由服务端补充 `score_version`、`received_at`。
+
+**EvaluationReportInput / EvaluationReport**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| task_id | string | 本轮作业编号，须与路径中的 `session_id` 一致 |
+| scene | enum | 作业场景：`layer`（蛋鸡）/ `broiler`（肉鸡） |
+| total_score | number \| null | 本轮总得分 |
+| score_status | enum | 总分状态：`scoring_not_defined` / `insufficient_data` / `scored` |
+| operations | OperationResult[] | 操作与规定判定明细 |
+| score_version | number | 服务端生成：报告版本号，请求体不提交 |
+| received_at | ISO | 服务端生成：接收时刻，请求体不提交 |
+
+**OperationResult**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| operation_id | string | 本次操作编号 |
+| start_time_seconds | number | 操作开始时间，距本轮开始的秒数 |
+| end_time_seconds | number \| null | 操作结束时间，距本轮开始的秒数 |
+| score | number \| null | 本次操作得分 |
+| rule_results | RuleResult[] | 本次操作涉及的逐条规定判定 |
+
+**RuleResult**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| rule_id | string | 规定编号，如 `L01`、`M01` |
+| rule_name | string | 规定名称 |
+| result | enum | `compliant` / `noncompliant` / `unknown` / `not_applicable` |
+| violation_time_seconds | number \| null | 违规发生时间，距本轮开始的秒数；无违规为 `null` |
+| score | number \| null | 本次操作在这条规定上的得分 |
+| deducted_points | number \| null | 因这条规定被扣除的分值，不得为负 |
+| reason | string | 判定原因 |
+
+一致性校验（详见 [API.md](./API.md) §5）：
+
+1. `task_id` 与路径会话 ID 不一致 → 400
+2. `scene` 与任务场景不一致 → 400
+3. `score_status=scored` 但 `total_score` 为空（或反之）→ 400
+4. 违规时间落在操作区间外、操作时间倒序 → 400
+
 ---
 
 ## 5. HTTP 接口清单
