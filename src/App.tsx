@@ -1,16 +1,20 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CssBaseline, ThemeProvider } from "@mui/material";
 import { styled } from "@mui/material/styles";
-import theme from "./theme/theme";
+import theme, { HUD } from "./theme/theme";
 import AppBar from "./components/AppBar/AppBar";
 import VideoPanel, { type CameraEye } from "./components/VideoPanel/VideoPanel";
 import ViewerPanel from "./components/Viewer/ViewerPanel";
 import DevicePage from "./components/DeviceStatus/DevicePage";
+import PairingPage from "./components/Pairing/PairingPage";
 import TaskInfoPage from "./components/TaskInfo/TaskInfoPage";
+import SettingsPage from "./components/Settings/SettingsPage";
 import type { DeviceOption } from "./components/TaskInfo/NewTaskForm";
 import LoginPage from "./components/Login/LoginPage";
-import { NotificationProvider, useNotification } from "./contexts/NotificationContext";
+import { authApi, type AuthUser, type Role } from "./api";
+import { NotificationProvider } from "./contexts/NotificationContext";
 import { PlaybackProvider } from "./contexts/PlaybackContext";
+import { loadCodes, saveCodes, type DeviceCodeEntry } from "./deviceCodes";
 
 const AppContainer = styled("div")({
   display: "flex",
@@ -20,7 +24,7 @@ const AppContainer = styled("div")({
   overflow: "hidden",
 });
 
-/** 图片视图：左目 / 右目 / 效果图三栏等宽；双击放大时收成两栏等宽 */
+/** 图片视图：左目 / 右目 / 手部图三栏等宽；双击放大时收成两栏等宽 */
 const MediaRow = styled("div")({
   display: "flex",
   flex: 1,
@@ -49,32 +53,145 @@ const ViewerColumn = styled("div")(({ theme }) => ({
   borderLeft: `1px solid ${theme.palette.divider}`,
 }));
 
-/** 无设备连接时的空白画面 */
-const EmptyMain = styled("div")({
+/** 无设备接入时的画面占位：保留左目 / 右目 / 手部图三块分区，明确告知无画面 */
+const EmptyEyes = styled("div")({
+  display: "flex",
   flex: 1,
+  minWidth: 0,
   minHeight: 0,
 });
 
-type Page = "main" | "config" | "task";
+const EmptyPane = styled("div")({
+  position: "relative",
+  display: "flex",
+  flex: 1,
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  minWidth: 0,
+  minHeight: 0,
+  padding: "0 12px",
+  backgroundColor: "#04090f",
+  textAlign: "center",
+});
+
+const EmptyTag = styled("span")({
+  position: "absolute",
+  top: 10,
+  left: 12,
+  padding: "1px 8px",
+  borderRadius: 4,
+  border: `1px solid ${HUD.lineSoft}`,
+  backgroundColor: "rgba(4, 9, 15, 0.55)",
+  fontSize: 10.5,
+  letterSpacing: 0.8,
+  color: HUD.textDim,
+});
+
+const EmptyTitle = styled("span")({
+  fontSize: 13,
+  letterSpacing: 2,
+  color: HUD.textDim,
+});
+
+const EmptyHint = styled("span")({
+  fontSize: 11,
+  letterSpacing: 0.3,
+  lineHeight: 1.6,
+  color: HUD.textDim,
+  opacity: 0.7,
+});
+
+type Page = "main" | "config" | "pair" | "task" | "settings";
+
+/** 全局设备注册表：任务页与配对页共用，配对成功即标记为已连接 */
+const INITIAL_DEVICES: DeviceOption[] = [
+  { id: "头盔-01", alias: "1号抓鸡位", online: true, paired: true },
+  { id: "头盔-02", alias: "2号抓鸡位", online: true, paired: true },
+  { id: "头盔-03", alias: "3号抓鸡位", online: false, paired: false },
+  { id: "头盔-04", alias: "4号抓鸡位", online: true, paired: false },
+];
+
+/** 已连接设备属于业务状态，刷新后仍需保留 */
+const PAIRED_KEY = "sheyuan.paired-devices";
+
+const loadPairedIds = (): string[] | null => {
+  try {
+    const raw = window.localStorage.getItem(PAIRED_KEY);
+    if (raw === null) return null;
+    const ids: unknown = JSON.parse(raw);
+    return Array.isArray(ids)
+      ? ids.filter((id): id is string => typeof id === "string")
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/** 设备注册表 = 初始设备 + 设备码库里新登记的设备 */
+const loadDevices = (): DeviceOption[] => {
+  const pairedIds = loadPairedIds();
+  const devices = INITIAL_DEVICES.map((d) => ({
+    ...d,
+    paired: pairedIds === null ? d.paired : pairedIds.includes(d.id),
+  }));
+  const extras = loadCodes()
+    .filter((c) => !devices.some((d) => d.id === c.id))
+    .map((c) => ({
+      id: c.id,
+      alias: "新登记设备",
+      online: true,
+      paired: pairedIds?.includes(c.id) ?? false,
+    }));
+  return [...devices, ...extras];
+};
 
 interface AppContentProps {
-  loggedInUser: string;
+  role: Role;
   onLogout: () => void;
 }
 
-function AppContent({ loggedInUser, onLogout }: AppContentProps) {
-  const { notify } = useNotification();
+function AppContent({ role, onLogout }: AppContentProps) {
   const [page, setPage] = useState<Page>("main");
-  /** 双击放大的那一路画面；放大后左右目与效果图各占一半 */
+  /** 双击放大的那一路画面；放大后左右目与 手部图各占一半 */
   const [expandedEye, setExpandedEye] = useState<CameraEye | null>(null);
-  /** 在线且已配对的设备，由任务页统一维护 */
-  const [connectedDevices, setConnectedDevices] = useState<DeviceOption[]>([]);
+  /** 注册设备与配对状态；配对页连接成功后写回这里，切页不丢 */
+  const [devices, setDevices] = useState<DeviceOption[]>(loadDevices);
+  /** 设备码库由管理员在设置页维护，配对页只认库内设备码 */
+  const [codes, setCodes] = useState<DeviceCodeEntry[]>(loadCodes);
+  /** 在线且已配对的设备 */
+  const connectedDevices = useMemo(
+    () => devices.filter((d) => d.online && d.paired),
+    [devices],
+  );
+
+  useEffect(() => {
+    saveCodes(codes);
+  }, [codes]);
+
+  useEffect(() => {
+    const ids = devices.filter((d) => d.paired).map((d) => d.id);
+    try {
+      window.localStorage.setItem(PAIRED_KEY, JSON.stringify(ids));
+    } catch {
+      /* 隐私模式下写入失败时仅保留内存状态 */
+    }
+  }, [devices]);
   /** 顶栏选中的设备；失效或未选时回落到第一台 */
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  /** 自增信号：配对页点「新建任务」时让任务页切到新建任务 */
+  const [newTaskSignal, setNewTaskSignal] = useState(0);
   const activeDeviceId =
     selectedDeviceId && connectedDevices.some((d) => d.id === selectedDeviceId)
       ? selectedDeviceId
       : (connectedDevices[0]?.id ?? null);
+
+  /** 只读角色不允许停留在设备配对页，非管理员不允许停留在设置页 */
+  useEffect(() => {
+    if (role === "viewer" && page === "pair") setPage("main");
+    if (role !== "admin" && page === "settings") setPage("main");
+  }, [role, page]);
 
   const toggleEye = (eye: CameraEye) =>
     setExpandedEye((current) => (current === eye ? null : eye));
@@ -84,12 +201,51 @@ function AppContent({ loggedInUser, onLogout }: AppContentProps) {
     setPage("main");
   };
 
+  const handlePaired = (id: string) =>
+    setDevices((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, paired: true } : d)),
+    );
+
+  const handleUnpaired = (id: string) =>
+    setDevices((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, paired: false } : d)),
+    );
+
+  /** 管理员登记设备码：分配新设备号并加入注册表，等待现场配对 */
+  const handleAddCode = (
+    code: string,
+  ): { ok: true; id: string } | { ok: false; message: string } => {
+    if (codes.some((c) => c.code === code)) {
+      return { ok: false, message: "该设备码已在库中" };
+    }
+    const maxNo = devices.reduce((max, d) => {
+      const no = Number(d.id.split("-").pop());
+      return Number.isFinite(no) ? Math.max(max, no) : max;
+    }, 0);
+    const id = `头盔-${String(maxNo + 1).padStart(2, "0")}`;
+    setCodes((prev) => [...prev, { id, code }]);
+    setDevices((prev) => [
+      ...prev,
+      { id, alias: "新登记设备", online: true, paired: false },
+    ]);
+    return { ok: true, id };
+  };
+
+  /** 移除设备码：该设备无法再通过配对校验，已建立的连接一并断开 */
+  const handleRemoveCode = (id: string) => {
+    setCodes((prev) => prev.filter((c) => c.id !== id));
+    setDevices((prev) =>
+      prev
+        .filter((d) => INITIAL_DEVICES.some((base) => base.id === d.id) || d.id !== id)
+        .map((d) => (d.id === id ? { ...d, paired: false } : d)),
+    );
+  };
+
   return (
     <AppContainer>
       <AppBar
-        loggedInUser={loggedInUser}
+        role={role}
         onLogout={onLogout}
-        onMenuAction={(action) => notify(`${action}`, "info")}
         page={page}
         onNavigate={setPage}
         devices={connectedDevices}
@@ -108,41 +264,95 @@ function AppContent({ loggedInUser, onLogout }: AppContentProps) {
               />
             </VideoColumn>
             <ViewerColumn>
-              <ViewerPanel mode="效果图" />
+              <ViewerPanel mode="手部图" />
             </ViewerColumn>
           </MediaRow>
         ) : (
-          <EmptyMain />
+          <MediaRow>
+            <VideoColumn $grow={2}>
+              <EmptyEyes>
+                <EmptyPane>
+                  <EmptyTag>左目</EmptyTag>
+                  <EmptyTitle>无画面</EmptyTitle>
+                  <EmptyHint>未接入设备</EmptyHint>
+                </EmptyPane>
+                <EmptyPane>
+                  <EmptyTag>右目</EmptyTag>
+                  <EmptyTitle>无画面</EmptyTitle>
+                  <EmptyHint>未接入设备</EmptyHint>
+                </EmptyPane>
+              </EmptyEyes>
+            </VideoColumn>
+            <ViewerColumn>
+              <EmptyPane>
+                <EmptyTag>手部图</EmptyTag>
+                <EmptyTitle>无画面</EmptyTitle>
+                <EmptyHint>未接入设备 · 请先在「设备配对」接入</EmptyHint>
+              </EmptyPane>
+            </ViewerColumn>
+          </MediaRow>
         )
       ) : page === "config" ? (
         <DevicePage />
+      ) : page === "pair" && role !== "viewer" ? (
+        <PairingPage
+          devices={devices}
+          codes={codes}
+          onPaired={handlePaired}
+          onUnpaired={handleUnpaired}
+          onCreateTask={() => {
+            setNewTaskSignal((n) => n + 1);
+            setPage("task");
+          }}
+        />
+      ) : page === "settings" && role === "admin" ? (
+        <SettingsPage
+          codes={codes}
+          devices={devices}
+          onAddCode={handleAddCode}
+          onRemoveCode={handleRemoveCode}
+        />
       ) : null}
       {/* 保持在挂载状态，切页回来任务与计时不丢 */}
-      <TaskInfoPage hidden={page !== "task"} onConnectedDevicesChange={setConnectedDevices} />
+      <TaskInfoPage
+        hidden={page !== "task"}
+        role={role}
+        devices={devices}
+        newTaskSignal={newTaskSignal}
+      />
     </AppContainer>
   );
 }
 
 function App() {
-  const [loggedInUser, setLoggedInUser] = useState<string | null>(() => {
-    return localStorage.getItem("lichtblick_user");
-  });
+  const [user, setUser] = useState<AuthUser | null>(() => authApi.currentUser());
+  const [notice, setNotice] = useState("");
 
-  const handleLogin = (username: string) => {
-    localStorage.setItem("lichtblick_user", username);
-    setLoggedInUser(username);
+  useEffect(
+    () =>
+      authApi.onUnauthorized(() => {
+        setUser(null);
+        setNotice("登录已过期，请重新登录");
+      }),
+    [],
+  );
+
+  const handleLogin = (next: AuthUser) => {
+    setUser(next);
+    setNotice("");
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("lichtblick_user");
-    setLoggedInUser(null);
+    void authApi.logout();
+    setUser(null);
+    setNotice("");
   };
 
-  if (!loggedInUser) {
+  if (!user) {
     return (
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <LoginPage onLogin={handleLogin} />
+        <LoginPage onLogin={handleLogin} notice={notice} />
       </ThemeProvider>
     );
   }
@@ -152,7 +362,7 @@ function App() {
       <CssBaseline />
       <NotificationProvider>
         <PlaybackProvider>
-          <AppContent loggedInUser={loggedInUser} onLogout={handleLogout} />
+          <AppContent role={user.role} onLogout={handleLogout} />
         </PlaybackProvider>
       </NotificationProvider>
     </ThemeProvider>

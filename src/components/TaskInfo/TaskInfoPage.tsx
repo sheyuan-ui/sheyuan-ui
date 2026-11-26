@@ -2,17 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { keyframes, styled } from "@mui/material/styles";
 import { HUD } from "../../theme/theme";
 import { useNotification } from "../../contexts/NotificationContext";
+import type { Role } from "../../api";
 import NewTaskForm, {
   type DeviceOption,
   type NewTaskInput,
 } from "./NewTaskForm";
-
-const INITIAL_DEVICES: DeviceOption[] = [
-  { id: "头盔-01", alias: "1号抓鸡位", online: true, paired: true },
-  { id: "头盔-02", alias: "2号抓鸡位", online: true, paired: true },
-  { id: "头盔-03", alias: "3号抓鸡位", online: false, paired: false },
-  { id: "头盔-04", alias: "4号抓鸡位", online: true, paired: false },
-];
+import AttachmentDialog, { type Attachment } from "./AttachmentPreview";
 
 const SITES = ["1号场区", "2号场区", "3号场区"];
 
@@ -161,26 +156,61 @@ interface CurrentTask {
   id: string;
   site: string;
   hall: string;
+  scene: string;
   batch: string;
   operator: string;
   date: string;
+  location: string;
+  /** 全部运行中设备（含此前下发、本轮未勾选而继续运行的设备） */
   deviceIds: string[];
+  /** 本次下发选中的设备；缺省视为全部 */
+  dispatchIds?: string[];
   startAt: string;
   note: string;
-  attachments: string[];
+  attachments: Attachment[];
 }
 
-const INITIAL_TASK: CurrentTask = {
-  id: "T-20261119-003",
-  site: "2号场区",
-  hall: "3号栋",
-  batch: "B-1118",
-  operator: "张三",
-  date: "2026-11-19",
-  deviceIds: ["头盔-01", "头盔-02"],
-  startAt: "09:12",
-  note: "",
-  attachments: ["批次资料.pdf", "作业单.xlsx"],
+/** 运行中的任务属于业务状态：刷新、切页、重新登录后都要还原 */
+const TASK_STATE_KEY = "sheyuan.current-task";
+/** 旧版本里写死的运行时长不应继续回放，版本不符时按全新任务开始 */
+const TASK_STATE_VERSION = 2;
+
+interface StoredTaskState {
+  v: number;
+  task: CurrentTask;
+  names: Record<string, string>;
+  joinedAt: Record<string, number>;
+  offlineAt: Record<string, number>;
+  elapsed: number;
+  /** 最近一次下发时的 elapsed；任务计时从这一刻起算 */
+  dispatchAt?: number;
+  savedAt: number;
+}
+
+const loadTaskState = (): StoredTaskState | null => {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TASK_STATE_KEY) ?? "null");
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      parsed.v !== TASK_STATE_VERSION ||
+      !parsed.task ||
+      !Array.isArray(parsed.task.deviceIds) ||
+      typeof parsed.elapsed !== "number" ||
+      typeof parsed.savedAt !== "number"
+    ) {
+      return null;
+    }
+    // 旧版本附件存的是文件名数组，统一成对象便于点击查看
+    parsed.task.attachments = Array.isArray(parsed.task.attachments)
+      ? parsed.task.attachments.map((a: unknown) =>
+          typeof a === "string" ? { name: a } : a,
+        )
+      : [];
+    return parsed as StoredTaskState;
+  } catch {
+    return null;
+  }
 };
 
 interface HistoryTask {
@@ -329,10 +359,44 @@ interface ReviewEvent {
   clip: string;
   ai: "违规" | "合规";
   aiReason: string;
-  status: "待复核" | "已确认" | "已驳回";
+  status: "待复核" | "已确认" | "已驳回" | "无法判定";
   reviewer: string;
   note: string;
+  /** 事件所属任务；复核页按任务编号与批次分组，跨当前与历史任务 */
+  taskId: string;
+  taskName: string;
+  batch: string;
+  site: string;
+  hall: string;
 }
+
+interface EventGroup {
+  taskName: string;
+  taskId: string;
+  batch: string;
+  site: string;
+  hall: string;
+  current: boolean;
+  pending: number;
+  reviewed: number;
+  devices: string[];
+  events: ReviewEvent[];
+}
+
+/** 逐条复核的人工结论；无法判定也算已复核 */
+type Conclusion = "有效" | "无效" | "无法判定";
+
+const conclusionOf = (status: ReviewEvent["status"]): Conclusion | null =>
+  status === "已确认"
+    ? "有效"
+    : status === "已驳回"
+      ? "无效"
+      : status === "无法判定"
+        ? "无法判定"
+        : null;
+
+const statusOf = (conclusion: Conclusion): ReviewEvent["status"] =>
+  conclusion === "有效" ? "已确认" : conclusion === "无效" ? "已驳回" : "无法判定";
 
 const INITIAL_EVENTS: ReviewEvent[] = [
   {
@@ -349,6 +413,11 @@ const INITIAL_EVENTS: ReviewEvent[] = [
     status: "待复核",
     reviewer: "",
     note: "",
+    taskId: "T-20261119-003",
+    taskName: "20261119-0912-01",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
   },
   {
     id: "E-1051",
@@ -364,6 +433,11 @@ const INITIAL_EVENTS: ReviewEvent[] = [
     status: "待复核",
     reviewer: "",
     note: "",
+    taskId: "T-20261119-003",
+    taskName: "20261119-0912-02",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
   },
   {
     id: "E-1063",
@@ -379,6 +453,11 @@ const INITIAL_EVENTS: ReviewEvent[] = [
     status: "待复核",
     reviewer: "",
     note: "",
+    taskId: "T-20261119-003",
+    taskName: "20261119-0912-01",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
   },
   {
     id: "E-1074",
@@ -394,6 +473,11 @@ const INITIAL_EVENTS: ReviewEvent[] = [
     status: "已确认",
     reviewer: "张三",
     note: "画面清晰，与判定一致",
+    taskId: "T-20261119-003",
+    taskName: "20261119-0912-02",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
   },
   {
     id: "E-1088",
@@ -409,16 +493,143 @@ const INITIAL_EVENTS: ReviewEvent[] = [
     status: "已驳回",
     reviewer: "李四",
     note: "实际为调整握姿，不构成重复抓取",
+    taskId: "T-20261119-003",
+    taskName: "20261119-0912-01",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
+  },
+  {
+    id: "E-0987",
+    time: "08:22:10",
+    device: "头盔-01",
+    action: "抓取",
+    conf: 0.79,
+    evaluable: "可评估",
+    rule: "R-03 停留时长",
+    clip: "00:06:31–00:06:52",
+    ai: "违规",
+    aiReason: "抓取后停留超过阈值 2.1s",
+    status: "待复核",
+    reviewer: "",
+    note: "",
+    taskId: "T-20261119-002",
+    taskName: "20261119-0810-01",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
+  },
+  {
+    id: "E-0992",
+    time: "08:25:44",
+    device: "头盔-02",
+    action: "转移",
+    conf: 0.84,
+    evaluable: "可评估",
+    rule: "R-05 动作顺序",
+    clip: "00:09:10–00:09:32",
+    ai: "违规",
+    aiReason: "转移前未完成提起动作",
+    status: "待复核",
+    reviewer: "",
+    note: "",
+    taskId: "T-20261119-002",
+    taskName: "20261119-0810-02",
+    batch: "B-1118",
+    site: "2号场区",
+    hall: "3号栋",
+  },
+  {
+    id: "E-0921",
+    time: "14:18:03",
+    device: "头盔-02",
+    action: "放置",
+    conf: 0.88,
+    evaluable: "可评估",
+    rule: "R-06 放置高度",
+    clip: "00:11:08–00:11:26",
+    ai: "合规",
+    aiReason: "放置姿态符合规范",
+    status: "待复核",
+    reviewer: "",
+    note: "",
+    taskId: "T-20261118-005",
+    taskName: "20261118-1402-02",
+    batch: "B-1117",
+    site: "2号场区",
+    hall: "2号栋",
+  },
+  {
+    id: "E-0875",
+    time: "09:02:37",
+    device: "头盔-01",
+    action: "抓取",
+    conf: 0.35,
+    evaluable: "低置信",
+    rule: "R-02 抓取成功率",
+    clip: "00:05:12–00:05:38",
+    ai: "合规",
+    aiReason: "置信度不足，建议人工确认",
+    status: "待复核",
+    reviewer: "",
+    note: "",
+    taskId: "T-20261118-003",
+    taskName: "20261118-0844-01",
+    batch: "B-1116",
+    site: "1号场区",
+    hall: "1号栋",
+  },
+  {
+    id: "E-0810",
+    time: "15:44:19",
+    device: "头盔-04",
+    action: "放置",
+    conf: 0.91,
+    evaluable: "可评估",
+    rule: "R-06 放置高度",
+    clip: "00:10:20–00:10:41",
+    ai: "合规",
+    aiReason: "放置姿态符合规范",
+    status: "已确认",
+    reviewer: "王五",
+    note: "画面清晰，与判定一致",
+    taskId: "T-20261117-004",
+    taskName: "20261117-1520-04",
+    batch: "B-1115",
+    site: "3号场区",
+    hall: "4号栋",
   },
 ];
 
-const SESSION_OPERATORS = ["张三", "李四", "王五"];
-
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
-/** 下发时刻的任务名基底：20261119-1919 */
-const stampName = (d = new Date()) =>
-  `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+const ymd = (at: Date) => `${at.getFullYear()}${pad2(at.getMonth() + 1)}${pad2(at.getDate())}`;
+
+/** 下发时刻 → 任务编号（按天流水） */
+const dispatchedTaskId = (prevId: string, at = new Date()) => {
+  const day = ymd(at);
+  const [, prevDay, prevSeq] = prevId.split("-");
+  const seq = prevDay === day ? Number(prevSeq) + 1 : 1;
+  return `T-${day}-${String(seq).padStart(3, "0")}`;
+};
+
+const clock = (at = new Date()) => `${pad2(at.getHours())}:${pad2(at.getMinutes())}`;
+
+/** 首次打开时的空任务：没有下发设备就不存在运行任务 */
+const createInitialTask = (at: Date): CurrentTask => ({
+  id: `T-${ymd(at)}-001`,
+  site: "2号场区",
+  hall: "3号栋",
+  scene: "肉鸡",
+  batch: "B-1118",
+  operator: "张三",
+  date: `${at.getFullYear()}-${pad2(at.getMonth() + 1)}-${pad2(at.getDate())}`,
+  location: "31.2304, 121.4737",
+  deviceIds: [],
+  startAt: clock(at),
+  note: "",
+  attachments: [{ name: "批次资料.pdf" }, { name: "作业单.xlsx" }],
+});
 
 function formatDuration(seconds: number) {
   const h = Math.floor(seconds / 3600);
@@ -441,15 +652,6 @@ interface SessionRow {
 
 const deviceNo = (id: string) => id.split("-").pop() ?? id;
 
-const OPERATOR_BY_DEVICE: Record<string, string> = {
-  "01": "张三",
-  "02": "李四",
-  "03": "王五",
-  "04": "王五",
-};
-
-const operatorFor = (id: string) => OPERATOR_BY_DEVICE[deviceNo(id)] ?? SESSION_OPERATORS[0];
-
 const scoreFor = (id: string) => DEVICE_SCORES[deviceNo(id)] ?? DEVICE_SCORES["01"];
 
 const durationToSeconds = (text: string) => {
@@ -461,13 +663,14 @@ function buildSessions(
   deviceIds: string[],
   taskNames: Record<string, string>,
   recorded: Record<string, number>,
+  operator: string,
 ): SessionRow[] {
   return deviceIds.map((id, i) => {
     const profile = scoreFor(id);
     return {
       device: id,
       taskName: taskNames[id] ?? id,
-      operator: operatorFor(id),
+      operator,
       status: "运行中",
       score: profile.score,
       grabs: Math.max(7 - i * 2, 1),
@@ -482,7 +685,7 @@ function buildHistorySessions(task: HistoryTask): SessionRow[] {
   return task.deviceIds.map((id, i) => ({
     device: id,
     taskName: task.name,
-    operator: operatorFor(id),
+    operator: task.operator,
     status: task.status,
     score: task.score === null ? null : Math.max(task.score - i * 2.1, 0),
     grabs: Math.max(6 - i, 1),
@@ -632,13 +835,14 @@ const NavItem = styled("button")<{ $active: boolean }>(({ $active }) => ({
   },
 }));
 
-const NavRunDot = styled("i")({
+const NavRunDot = styled("i")<{ $running: boolean }>(({ $running }) => ({
   width: 5,
   height: 5,
   borderRadius: "50%",
-  backgroundColor: HUD.ok,
-  animation: `${pulse} 1.6s ease-in-out infinite`,
-});
+  backgroundColor: $running ? HUD.ok : HUD.danger,
+  animation: $running ? `${pulse} 1.6s ease-in-out infinite` : "none",
+  boxShadow: $running ? "none" : `0 0 6px ${HUD.danger}`,
+}));
 
 const NavBadge = styled("span")<{ $warn?: boolean }>(({ $warn }) => ({
   marginLeft: "auto",
@@ -725,6 +929,70 @@ const CardTitle = styled("h3")({
   fontSize: 12,
   fontWeight: 600,
   letterSpacing: 0.6,
+  color: HUD.textDim,
+});
+
+/** 复核列表：每个任务一行，默认收起，点击任务行展开事件清单 */
+const GroupHeadRow = styled("div")({
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  padding: "11px 16px",
+  transition: "background-color 160ms ease",
+  "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.025)" },
+});
+
+const GroupToggle = styled("button")({
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  flex: 1,
+  minWidth: 0,
+  padding: 0,
+  border: "none",
+  background: "transparent",
+  color: "inherit",
+  font: "inherit",
+  textAlign: "left",
+  cursor: "pointer",
+  "&:focus-visible": { outline: `1px solid ${HUD.cyan}66`, outlineOffset: 2 },
+});
+
+const Caret = styled("span")<{ $open: boolean }>(({ $open }) => ({
+  flexShrink: 0,
+  fontSize: 10,
+  lineHeight: 1,
+  color: $open ? HUD.cyan : HUD.textDim,
+  transform: $open ? "rotate(90deg)" : "none",
+  transition: "transform 160ms ease, color 160ms ease",
+}));
+
+const GroupHeadMain = styled("div")({
+  display: "flex",
+  flexDirection: "column",
+  gap: 3,
+  minWidth: 0,
+});
+
+const GroupTitleRow = styled("div")({
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 8,
+  minWidth: 0,
+});
+
+const GroupName = styled("span")({
+  fontFamily: '"Roboto Mono", "Consolas", monospace',
+  fontSize: 12.5,
+  fontWeight: 600,
+  letterSpacing: 0.4,
+  color: HUD.text,
+});
+
+const GroupMeta = styled("span")({
+  fontSize: 11,
+  letterSpacing: 0.2,
   color: HUD.textDim,
 });
 
@@ -884,6 +1152,21 @@ const NoteLine = styled("div")({
   marginTop: 10,
   fontSize: 12,
   color: HUD.textDim,
+});
+
+/** 当前任务里的附件名，点击打开预览 */
+const AttachLink = styled("button")({
+  padding: 0,
+  border: "none",
+  background: "none",
+  font: "inherit",
+  color: HUD.text,
+  textDecoration: "underline",
+  textDecorationColor: HUD.line,
+  textUnderlineOffset: 2,
+  cursor: "pointer",
+  transition: "color 140ms ease",
+  "&:hover": { color: HUD.cyan, textDecorationColor: HUD.cyan },
 });
 
 /** 评分概览 + 评分标准两栏 */
@@ -1159,23 +1442,22 @@ const StageCount = styled("span")({
   color: HUD.textDim,
 });
 
-/** 事件复核 */
-const EventRow = styled("div")(({ theme }) => ({
+/** 展开后的事件清单 */
+const EventList = styled("div")(({ theme }) => ({
   display: "flex",
-  gap: 16,
-  flexWrap: "wrap",
-  padding: "13px 16px",
-  borderBottom: `1px solid ${theme.palette.divider}`,
-  "&:last-of-type": { borderBottom: "none" },
+  flexDirection: "column",
+  borderTop: `1px solid ${theme.palette.divider}`,
 }));
 
-const EventMain = styled("div")({
-  flex: 1,
-  minWidth: 260,
+const EventRow = styled("div")(({ theme }) => ({
   display: "flex",
   flexDirection: "column",
   gap: 5,
-});
+  padding: "10px 16px 10px 44px",
+  borderBottom: `1px solid ${theme.palette.divider}`,
+  "&:last-of-type": { borderBottom: "none" },
+  "@media (max-width: 640px)": { paddingLeft: 24 },
+}));
 
 const EventHead = styled("div")({
   display: "flex",
@@ -1196,14 +1478,6 @@ const EventDevice = styled("span")({
   color: HUD.text,
 });
 
-/** 每条事件所属的独立设备任务名 */
-const EventTask = styled("span")({
-  fontFamily: '"Roboto Mono", "Consolas", monospace',
-  fontSize: 11,
-  letterSpacing: 0.4,
-  color: HUD.textDim,
-});
-
 const EventTitle = styled("span")({
   fontSize: 13,
   fontWeight: 600,
@@ -1214,39 +1488,6 @@ const EventMeta = styled("div")({
   fontSize: 11,
   letterSpacing: 0.2,
   color: HUD.textDim,
-});
-
-const EventAi = styled("div")<{ $bad: boolean }>(({ $bad }) => ({
-  fontSize: 12,
-  color: $bad ? HUD.orange : HUD.ok,
-}));
-
-const EventSide = styled("div")({
-  display: "flex",
-  flexDirection: "column",
-  gap: 7,
-  width: 250,
-  flexShrink: 0,
-  "@media (max-width: 900px)": { width: "100%" },
-});
-
-const NoteInput = styled("input")({
-  height: 30,
-  padding: "0 10px",
-  borderRadius: 5,
-  border: `1px solid ${HUD.lineSoft}`,
-  background: "rgba(4, 9, 15, 0.6)",
-  color: HUD.text,
-  fontSize: 12,
-  outline: "none",
-  transition: "border-color 160ms ease, background-color 160ms ease",
-  "&:focus": { borderColor: HUD.lineStrong, backgroundColor: "rgba(4, 9, 15, 0.85)" },
-  "&::placeholder": { color: HUD.textDim },
-});
-
-const RowActions = styled("div")({
-  display: "flex",
-  gap: 6,
 });
 
 const SmallBtn = styled("button")<{ $primary?: boolean; $danger?: boolean }>(
@@ -1268,9 +1509,209 @@ const SmallBtn = styled("button")<{ $primary?: boolean; $danger?: boolean }>(
         color: $danger ? "#fff" : HUD.text,
         backgroundColor: $danger ? "rgba(245, 73, 102, 0.24)" : "rgba(63, 178, 255, 0.16)",
       },
+      "&:disabled": { opacity: 0.5, cursor: "default" },
     };
   },
 );
+
+/** 分组卡片上的“逐条复核”文字入口 */
+const ReviewLink = styled("button")({
+  padding: 0,
+  border: "none",
+  background: "transparent",
+  color: HUD.cyan,
+  fontSize: 11.5,
+  letterSpacing: 0.2,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  "&:hover": { textDecoration: "underline" },
+});
+
+/** 任务详情与复核：左时间线 + 片段回放，右侧复核与评分 */
+const ReviewGrid = styled("div")({
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1.05fr) minmax(320px, 0.95fr)",
+  gap: 12,
+  alignItems: "start",
+  "@media (max-width: 980px)": { gridTemplateColumns: "1fr" },
+});
+
+const ReviewCol = styled("div")({
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+  minWidth: 0,
+});
+
+const TimelineBody = styled("div")({
+  display: "flex",
+  flexDirection: "column",
+  margin: "10px 16px 14px",
+  borderLeft: `1px solid ${HUD.lineSoft}`,
+});
+
+const TimelineItem = styled("button")<{ $active: boolean }>(({ $active }) => ({
+  position: "relative",
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  padding: "9px 12px 9px 16px",
+  border: "none",
+  background: $active ? "rgba(63, 178, 255, 0.08)" : "transparent",
+  textAlign: "left",
+  font: "inherit",
+  cursor: "pointer",
+  transition: "background-color 160ms ease",
+  "&::before": {
+    content: '""',
+    position: "absolute",
+    left: -4,
+    top: 15,
+    width: 7,
+    height: 7,
+    borderRadius: "50%",
+    border: `1px solid ${$active ? HUD.cyan : HUD.line}`,
+    backgroundColor: $active ? HUD.cyan : "#04090f",
+  },
+  "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.03)" },
+}));
+
+const TimelineTitle = styled("b")({
+  fontFamily: '"Roboto Mono", "Consolas", monospace',
+  fontSize: 12.5,
+  fontWeight: 600,
+  letterSpacing: 0.2,
+  color: HUD.text,
+  fontVariantNumeric: "tabular-nums",
+});
+
+const TimelineMeta = styled("span")({
+  fontSize: 11,
+  letterSpacing: 0.2,
+  color: HUD.textDim,
+});
+
+const ClipStage = styled("div")({
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minHeight: 260,
+  padding: "0 20px",
+  borderRadius: 6,
+  border: `1px dashed ${HUD.line}`,
+  background:
+    "repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.02) 0 10px, transparent 10px 20px)",
+  color: HUD.textDim,
+  fontSize: 11.5,
+  letterSpacing: 0.3,
+  textAlign: "center",
+});
+
+const ClipTag = styled("span")({
+  position: "absolute",
+  left: 10,
+  top: 10,
+  padding: "0 8px",
+  borderRadius: 4,
+  border: `1px solid ${HUD.lineSoft}`,
+  backgroundColor: "rgba(4, 9, 15, 0.7)",
+  color: HUD.text,
+  fontSize: 10.5,
+  letterSpacing: 0.3,
+});
+
+const ReviewRows = styled("div")({
+  padding: "12px 16px 0",
+});
+
+const ReviewRow = styled("div")(({ theme }) => ({
+  display: "grid",
+  gridTemplateColumns: "92px minmax(0, 1fr)",
+  border: `1px solid ${theme.palette.divider}`,
+  borderBottom: "none",
+  "&:last-of-type": { borderBottom: `1px solid ${theme.palette.divider}` },
+}));
+
+const ReviewLabel = styled("div")(({ theme }) => ({
+  padding: "11px 12px",
+  borderRight: `1px solid ${theme.palette.divider}`,
+  backgroundColor: "rgba(255, 255, 255, 0.02)",
+  fontSize: 11.5,
+  letterSpacing: 0.3,
+  color: HUD.textDim,
+}));
+
+const ReviewValue = styled("div")({
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  padding: "10px 14px",
+  minWidth: 0,
+  "& > b": { fontSize: 12.5, fontWeight: 600, color: HUD.text },
+});
+
+const ReviewSub = styled("span")({
+  fontSize: 11,
+  letterSpacing: 0.2,
+  color: HUD.textDim,
+});
+
+const ConclusionGroup = styled("div")({
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+});
+
+const ConclusionBtn = styled("button")<{ $active: boolean; $tone: "ok" | "danger" | "gold" }>(
+  ({ $active, $tone }) => {
+    const color = TONES[$tone];
+    return {
+      height: 28,
+      padding: "0 14px",
+      borderRadius: 5,
+      border: `1px solid ${$active ? color : HUD.lineSoft}`,
+      background: $active ? `${color}1f` : "transparent",
+      color: $active ? color : HUD.textDim,
+      fontSize: 12,
+      letterSpacing: 0.3,
+      cursor: "pointer",
+      "&:hover": { color, borderColor: `${color}88` },
+      "&:disabled": { opacity: 0.5, cursor: "default" },
+    };
+  },
+);
+
+const NoteArea = styled("textarea")({
+  width: "100%",
+  minHeight: 64,
+  resize: "vertical",
+  padding: "8px 10px",
+  borderRadius: 5,
+  border: `1px solid ${HUD.lineSoft}`,
+  background: "rgba(4, 9, 15, 0.6)",
+  color: HUD.text,
+  fontSize: 12,
+  fontFamily: "inherit",
+  lineHeight: 1.6,
+  outline: "none",
+  "&:focus": { borderColor: HUD.lineStrong, backgroundColor: "rgba(4, 9, 15, 0.85)" },
+  "&::placeholder": { color: HUD.textDim },
+});
+
+const SaveRow = styled("div")({
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  flexWrap: "wrap",
+  padding: "12px 16px 16px",
+});
+
+const SaveHint = styled("span")({
+  fontSize: 10.5,
+  letterSpacing: 0.2,
+  color: HUD.textDim,
+});
 
 const EmptyNote = styled("div")({
   padding: "20px 16px",
@@ -1466,51 +1907,148 @@ function SessionTable({
 
 interface TaskInfoPageProps {
   hidden?: boolean;
-  /** 在线且已配对的设备；用于顶栏计数与首页画面切换 */
-  onConnectedDevicesChange?: (devices: DeviceOption[]) => void;
+  /** 当前登录角色：viewer 只读，operator 可下发/复核，admin 另有顶部「设置」页 */
+  role: Role;
+  /** 全局设备注册表；配对页连接成功后这里同步更新 */
+  devices: DeviceOption[];
+  /** 自增信号：变化时切到新建任务 */
+  newTaskSignal?: number;
 }
 
 export default function TaskInfoPage({
   hidden = false,
-  onConnectedDevicesChange,
+  role,
+  devices,
+  newTaskSignal,
 }: TaskInfoPageProps) {
   const { notify } = useNotification();
+  const canOperate = role !== "viewer";
+  /** 已配对设备集合：运行任务只能挂在已配对设备上，未配对的存档任务视为失效 */
+  const pairedIds = useMemo(
+    () => new Set(devices.filter((d) => d.paired).map((d) => d.id)),
+    [devices],
+  );
+  const [boot] = useState(() => {
+    const stored = loadTaskState();
+    if (!stored) return null;
+    const ids = stored.task.deviceIds.filter((id) => pairedIds.has(id));
+    if (ids.length === 0) return null;
+    const dispatchIds = (stored.task.dispatchIds ?? ids).filter((id) => ids.includes(id));
+    return {
+      ...stored,
+      task: {
+        ...stored.task,
+        deviceIds: ids,
+        dispatchIds: dispatchIds.length > 0 ? dispatchIds : ids,
+      },
+    };
+  });
+  /** 本次打开页面的时刻；没有历史任务时用它生成新的任务编号与任务名 */
+  const [startedAt] = useState(() => new Date());
   const [tab, setTab] = useState<TaskTab>("current");
-  const [task, setTask] = useState<CurrentTask>(INITIAL_TASK);
-  const [devices, setDevices] = useState<DeviceOption[]>(INITIAL_DEVICES);
+  const [task, setTask] = useState<CurrentTask>(() => boot?.task ?? createInitialTask(startedAt));
   const [history] = useState<HistoryTask[]>(INITIAL_HISTORY);
   const [events, setEvents] = useState<ReviewEvent[]>(INITIAL_EVENTS);
-  const [elapsed, setElapsed] = useState(34 * 60 + 38);
-  const [joinedAt, setJoinedAt] = useState<Record<string, number>>({
-    "头盔-01": 0,
-    "头盔-02": 0,
-  });
+  const [elapsed, setElapsed] = useState(() =>
+    boot
+      ? boot.elapsed + Math.max(0, Math.floor((Date.now() - boot.savedAt) / 1000))
+      : 0,
+  );
+  const [joinedAt, setJoinedAt] = useState<Record<string, number>>(
+    () => boot?.joinedAt ?? {},
+  );
+  /** 当前任务从最近一次下发开始计时；老存档缺记录时按存档时刻起算，不把历史时间带进来 */
+  const [dispatchAt, setDispatchAt] = useState<number>(() =>
+    boot ? (boot.dispatchAt ?? boot.elapsed) : 0,
+  );
+  const [preview, setPreview] = useState<Attachment | null>(null);
   /** 设备掉线后录制时长冻结在掉线那一刻 */
-  const [offlineAt, setOfflineAt] = useState<Record<string, number>>({});
-  const [deviceTaskNames, setDeviceTaskNames] = useState<Record<string, string>>({
-    "头盔-01": "20261119-0912-01",
-    "头盔-02": "20261119-0912-02",
-  });
+  const [offlineAt, setOfflineAt] = useState<Record<string, number>>(
+    () => boot?.offlineAt ?? {},
+  );
+  const [deviceTaskNames, setDeviceTaskNames] = useState<Record<string, string>>(
+    () => boot?.names ?? {},
+  );
   const [selectedHistory, setSelectedHistory] = useState<HistoryTask | null>(null);
   const [filterSite, setFilterSite] = useState("全部场区");
   const [filterBatch, setFilterBatch] = useState("");
   const [filterDevice, setFilterDevice] = useState("全部设备");
+  /** 关键词搜索：任务名称、任务编号、负责人 */
+  const [filterQuery, setFilterQuery] = useState("");
+  /** 逐条复核：当前查看的任务名称与事件，以及尚未保存的人工结论/备注 */
+  const [reviewTaskName, setReviewTaskName] = useState<string | null>(null);
+  const [reviewEventId, setReviewEventId] = useState<string | null>(null);
+  const [draftConclusion, setDraftConclusion] = useState<Conclusion | null>(null);
+  const [draftNote, setDraftNote] = useState("");
+  /** 复核列表按任务名称收起，点击任务行展开事件清单 */
+  const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
   /** 当前查看评分的设备；未选时取第一台 */
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
+  /** 每次进入新建任务都重建表单，默认参与设备取当前在线已连接设备 */
+  const [formKey, setFormKey] = useState(0);
 
-  const connectedDevices = useMemo(
-    () => devices.filter((d) => d.online && d.paired),
-    [devices],
-  );
+  const visibleTabs = TABS.filter((item) => (item.key === "new" ? canOperate : true));
 
   useEffect(() => {
-    onConnectedDevicesChange?.(connectedDevices);
-  }, [connectedDevices, onConnectedDevicesChange]);
+    if (!newTaskSignal) return;
+    if (!canOperate) {
+      setTab("current");
+      return;
+    }
+    setTab("new");
+    setFormKey((k) => k + 1);
+  }, [newTaskSignal, canOperate]);
+
+  /** 角色切换后落在无权访问的页签时退回当前任务 */
+  useEffect(() => {
+    if (tab === "new" && !canOperate) setTab("current");
+  }, [tab, canOperate]);
+
+  const openNewTaskTab = () => {
+    if (!canOperate) return;
+    setTab("new");
+    setFormKey((k) => k + 1);
+  };
 
   useEffect(() => {
     const timer = window.setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  /** 每 5 秒落一次盘，刷新后按 savedAt 补回流逝的运行时长 */
+  useEffect(() => {
+    if (elapsed % 5 !== 0) return;
+    const payload: StoredTaskState = {
+      v: TASK_STATE_VERSION,
+      task,
+      names: deviceTaskNames,
+      joinedAt,
+      offlineAt,
+      elapsed,
+      dispatchAt,
+      savedAt: Date.now(),
+    };
+    try {
+      window.localStorage.setItem(TASK_STATE_KEY, JSON.stringify(payload));
+    } catch {
+      /* 隐私模式下写入失败时仅保留内存状态 */
+    }
+  }, [task, deviceTaskNames, joinedAt, offlineAt, elapsed, dispatchAt]);
+
+  /** 设备取消配对后任务同步摘掉该设备；一台不剩就是没有运行任务 */
+  useEffect(() => {
+    setTask((prev) => {
+      if (prev.deviceIds.length === 0) return prev;
+      const ids = prev.deviceIds.filter((id) => pairedIds.has(id));
+      if (ids.length === prev.deviceIds.length) return prev;
+      const kept = (prev.dispatchIds ?? []).filter((id) => ids.includes(id));
+      return {
+        ...prev,
+        deviceIds: ids,
+        dispatchIds: kept.length > 0 ? kept : ids,
+      };
+    });
+  }, [pairedIds]);
 
   useEffect(() => {
     setOfflineAt((prev) => {
@@ -1568,88 +2106,177 @@ export default function TaskInfoPage({
       const end = offlineAt[id] ?? elapsed;
       recorded[id] = Math.max(0, end - (joinedAt[id] ?? 0));
     });
-    return buildSessions(task.deviceIds, deviceTaskNames, recorded);
-  }, [task.deviceIds, deviceTaskNames, joinedAt, offlineAt, elapsed]);
+    return buildSessions(task.deviceIds, deviceTaskNames, recorded, task.operator);
+  }, [task.deviceIds, deviceTaskNames, task.operator, joinedAt, offlineAt, elapsed]);
 
-  const firstDevice = task.deviceIds[0];
+  const firstDevice = (task.dispatchIds ?? task.deviceIds)[0];
+  const dispatchedCount = (task.dispatchIds ?? task.deviceIds).length;
   const taskTitle = firstDevice
     ? `${deviceTaskNames[firstDevice] ?? firstDevice}${
-        task.deviceIds.length > 1 ? ` 等 ${task.deviceIds.length} 台` : ""
+        dispatchedCount > 1 ? ` 等 ${dispatchedCount} 台` : ""
       }`
     : "暂无任务";
 
+  /** 本轮未勾选、但仍按原任务运行的设备 */
+  const continuedIds = task.deviceIds.filter(
+    (id) => !(task.dispatchIds ?? task.deviceIds).includes(id),
+  );
+
+  /** 设备会话表按每台设备当前运行的任务名统计待复核数；承接运行的设备沿用原任务的事件 */
+  const currentTaskEvents = useMemo(
+    () =>
+      events.filter(
+        (e) =>
+          task.deviceIds.includes(e.device) && deviceTaskNames[e.device] === e.taskName,
+      ),
+    [events, task.deviceIds, deviceTaskNames],
+  );
+
   const pendingByDevice = useMemo(() => {
     const map: Record<string, number> = {};
-    events.forEach((e) => {
+    currentTaskEvents.forEach((e) => {
       if (e.status === "待复核") map[e.device] = (map[e.device] ?? 0) + 1;
     });
     return map;
-  }, [events]);
+  }, [currentTaskEvents]);
 
+  /** 复核页覆盖当前任务与历史任务 */
   const pendingCount = events.filter((e) => e.status === "待复核").length;
   const reviewedCount = events.length - pendingCount;
 
-  const filteredHistory = useMemo(
-    () =>
-      history.filter(
-        (h) =>
-          (filterSite === "全部场区" || h.site === filterSite) &&
-          (!filterBatch || h.batch.toLowerCase().includes(filterBatch.trim().toLowerCase())) &&
-          (filterDevice === "全部设备" || h.deviceIds.includes(filterDevice)),
-      ),
-    [history, filterSite, filterBatch, filterDevice],
-  );
+  /** 按任务名称分组：每台设备的一次下发即一个任务，当前任务置顶，其余按名称倒序 */
+  const eventGroups = useMemo(() => {
+    const map = new Map<string, EventGroup>();
+    events.forEach((e) => {
+      let group = map.get(e.taskName);
+      if (!group) {
+        group = {
+          taskName: e.taskName,
+          taskId: e.taskId,
+          batch: e.batch,
+          site: e.site,
+          hall: e.hall,
+          current: task.deviceIds.includes(e.device) && deviceTaskNames[e.device] === e.taskName,
+          pending: 0,
+          reviewed: 0,
+          devices: [],
+          events: [],
+        };
+        map.set(e.taskName, group);
+      }
+      group.events.push(e);
+      if (!group.devices.includes(e.device)) group.devices.push(e.device);
+      if (e.status === "待复核") group.pending += 1;
+      else group.reviewed += 1;
+    });
+    return [...map.values()].sort((a, b) =>
+      a.current === b.current ? b.taskName.localeCompare(a.taskName) : a.current ? -1 : 1,
+    );
+  }, [events, task.deviceIds, deviceTaskNames]);
+
+  const filteredHistory = useMemo(() => {
+    const query = filterQuery.trim().toLowerCase();
+    return history.filter(
+      (h) =>
+        (filterSite === "全部场区" || h.site === filterSite) &&
+        (!filterBatch || h.batch.toLowerCase().includes(filterBatch.trim().toLowerCase())) &&
+        (filterDevice === "全部设备" || h.deviceIds.includes(filterDevice)) &&
+        (!query ||
+          [h.name, h.id, h.operator].some((value) =>
+            value.toLowerCase().includes(query),
+          )),
+    );
+  }, [history, filterSite, filterBatch, filterDevice, filterQuery]);
 
   const updateEvent = (id: string, patch: Partial<ReviewEvent>) =>
     setEvents((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 
-  const handlePaired = (id: string) => {
-    setDevices((prev) => prev.map((d) => (d.id === id ? { ...d, paired: true } : d)));
-    setTask((prev) =>
-      prev.deviceIds.includes(id)
-        ? prev
-        : { ...prev, deviceIds: [...prev.deviceIds, id] },
-    );
-    setJoinedAt((prev) => (id in prev ? prev : { ...prev, [id]: elapsed }));
-    setDeviceTaskNames((prev) => ({
-      ...prev,
-      [id]: prev[id] ?? `${stampName()}-${deviceNo(id)}`,
-    }));
+  const reviewGroup = reviewTaskName
+    ? eventGroups.find((group) => group.taskName === reviewTaskName) ?? null
+    : null;
+  const reviewEvent = reviewGroup?.events.find((e) => e.id === reviewEventId) ?? null;
+  const reviewProfile = reviewEvent ? scoreFor(reviewEvent.device) : null;
+
+  const selectReviewEvent = (event: ReviewEvent) => {
+    setReviewEventId(event.id);
+    setDraftConclusion(conclusionOf(event.status));
+    setDraftNote(event.note);
+  };
+
+  const openReview = (group: EventGroup) => {
+    const target = group.events.find((e) => e.status === "待复核") ?? group.events[0];
+    setReviewTaskName(group.taskName);
+    if (target) selectReviewEvent(target);
+  };
+
+  const toggleTask = (taskName: string) =>
+    setExpandedTasks((prev) => ({ ...prev, [taskName]: !prev[taskName] }));
+
+  const saveReview = () => {
+    if (!reviewEvent || draftConclusion === null) return;
+    updateEvent(reviewEvent.id, {
+      status: statusOf(draftConclusion),
+      reviewer: task.operator,
+      note: draftNote,
+    });
+    notify("复核已保存", "success");
   };
 
   const handleCreate = (input: NewTaskInput) => {
-    setDeviceTaskNames((prev) => {
-      const next = { ...prev };
-      input.deviceIds.forEach((id) => {
-        next[id] = `${input.name}-${deviceNo(id)}`;
-      });
-      return next;
+    const at = new Date();
+    const names: Record<string, string> = {};
+    input.deviceIds.forEach((id) => {
+      names[id] = `${input.name}-${deviceNo(id)}`;
     });
+    /** 现行任务只保留仍处于配对中的设备；未勾选的继续原任务与计时 */
+    const base = task.deviceIds.filter((id) => pairedIds.has(id));
+    const continued = base.filter((id) => !input.deviceIds.includes(id));
+    const runningIds = [
+      ...base,
+      ...input.deviceIds.filter((id) => !base.includes(id)),
+    ];
+
+    setDeviceTaskNames((prev) => ({ ...prev, ...names }));
+    // 新下发设备从此刻重新计时；承接运行的设备保留原 joinedAt
     setJoinedAt((prev) => {
-      const next = { ...prev };
+      const next: Record<string, number> = { ...prev };
       input.deviceIds.forEach((id) => {
-        if (next[id] === undefined) next[id] = elapsed;
+        next[id] = elapsed;
       });
       return next;
     });
-    setTask((prev) => {
-      const merged = [...prev.deviceIds];
+    setOfflineAt((prev) => {
+      const next = { ...prev };
       input.deviceIds.forEach((id) => {
-        if (!merged.includes(id)) merged.push(id);
+        delete next[id];
       });
-      return {
-        ...prev,
-        site: input.site || prev.site,
-        hall: input.hall || prev.hall,
-        batch: input.batch || prev.batch,
-        operator: input.leader || prev.operator,
-        note: input.note || prev.note,
-        attachments: Array.from(new Set([...prev.attachments, ...input.attachments])),
-        deviceIds: merged,
-      };
+      return next;
     });
+    setDispatchAt(elapsed);
+    setSelectedDevice(null);
     setSelectedHistory(null);
-    notify(`已并入当前任务：${input.deviceIds.join("、")}`, "success");
+    setTask((prev) => ({
+      ...prev,
+      id: dispatchedTaskId(prev.id, at),
+      site: input.site,
+      hall: input.hall,
+      scene: input.scene,
+      batch: input.batch,
+      operator: input.leader,
+      date: input.date,
+      location: input.location,
+      deviceIds: runningIds,
+      dispatchIds: input.deviceIds,
+      startAt: clock(at),
+      note: input.note,
+      attachments: input.attachments,
+    }));
+    notify(
+      continued.length > 0
+        ? `已下发任务：${input.deviceIds.join("、")}；${continued.join("、")} 保持原任务继续运行`
+        : `已下发任务：${input.deviceIds.join("、")}`,
+      "success",
+    );
     setTab("current");
   };
 
@@ -1660,15 +2287,15 @@ export default function TaskInfoPage({
           <h1>任务信息</h1>
           <span>AI 作业规范评分 · 任务调度</span>
         </SideHead>
-        {TABS.map((item) => (
+        {visibleTabs.map((item) => (
           <NavItem
             key={item.key}
             type="button"
             $active={tab === item.key}
-            onClick={() => setTab(item.key)}
+            onClick={() => (item.key === "new" ? openNewTaskTab() : setTab(item.key))}
           >
             {item.label}
-            {item.key === "current" && <NavRunDot />}
+            {item.key === "current" && <NavRunDot $running={task.deviceIds.length > 0} />}
             {item.key === "review" && pendingCount > 0 && <NavBadge $warn>{pendingCount}</NavBadge>}
             {item.key === "history" && <NavBadge>{history.length}</NavBadge>}
           </NavItem>
@@ -1677,7 +2304,21 @@ export default function TaskInfoPage({
 
       <Content>
         <ContentInner>
-          {tab === "current" && (
+          {tab === "current" && task.deviceIds.length === 0 && (
+            <>
+              <SectionHead>
+                <SectionTitle>当前任务</SectionTitle>
+                <SectionHint>当前没有已接入的运行设备</SectionHint>
+              </SectionHead>
+              <Card>
+                <EmptyNote>
+                  暂无运行设备 · 请先在「设备配对」接入设备，再到「新建任务」下发
+                </EmptyNote>
+              </Card>
+            </>
+          )}
+
+          {tab === "current" && task.deviceIds.length > 0 && (
             <>
               <SectionHead>
                 <SectionTitle>当前任务</SectionTitle>
@@ -1695,27 +2336,49 @@ export default function TaskInfoPage({
                           运行中
                         </RunChip>
                       </TaskNameRow>
-                      <TaskId>{task.id} · 各设备任务独立命名</TaskId>
+                      <TaskId>{task.id}</TaskId>
                     </div>
                     <TimerBlock>
                       <span>运行时长</span>
-                      <b>{formatDuration(elapsed)}</b>
+                      <b>{formatDuration(Math.max(0, elapsed - dispatchAt))}</b>
                     </TimerBlock>
                   </TaskTop>
                   <MetaGrid>
                     <Meta><span>场区</span><b>{task.site}</b></Meta>
                     <Meta><span>栋舍</span><b>{task.hall}</b></Meta>
+                    <Meta><span>场景</span><b>{task.scene || "未指定"}</b></Meta>
                     <Meta><span>批次</span><b>{task.batch}</b></Meta>
                     <Meta><span>负责人</span><b>{task.operator}</b></Meta>
                     <Meta><span>作业日期</span><b>{task.date}</b></Meta>
-                    <Meta><span>参与设备</span><b>{task.deviceIds.join("、")}</b></Meta>
+                    <Meta><span>本次下发</span><b>{(task.dispatchIds ?? task.deviceIds).join("、")}</b></Meta>
+                    {continuedIds.length > 0 && (
+                      <Meta><span>承接运行</span><b>{continuedIds.join("、")}</b></Meta>
+                    )}
+                    <Meta>
+                      <span>经纬度</span>
+                      <b>{task.location || "未记录"}</b>
+                    </Meta>
                     <Meta><span>开始时间</span><b>今天 {task.startAt}</b></Meta>
                   </MetaGrid>
                   {(task.note || task.attachments.length > 0) && (
                     <NoteLine>
                       {task.note && <span>备注：{task.note}</span>}
                       {task.attachments.length > 0 && (
-                        <span>附件：{task.attachments.join("、")}</span>
+                        <span>
+                          附件：
+                          {task.attachments.map((file, i) => (
+                            <span key={file.name}>
+                              <AttachLink
+                                type="button"
+                                title="查看附件"
+                                onClick={() => setPreview(file)}
+                              >
+                                {file.name}
+                              </AttachLink>
+                              {i < task.attachments.length - 1 ? "、" : ""}
+                            </span>
+                          ))}
+                        </span>
                       )}
                     </NoteLine>
                   )}
@@ -1901,91 +2564,314 @@ export default function TaskInfoPage({
             <>
               <SectionHead>
                 <SectionTitle>新建任务</SectionTitle>
-                <SectionHint>配对成功的设备会立即并入当前任务，下发确认不会停止当前任务</SectionHint>
+                <SectionHint>参与设备从已配对列表多选；下发只影响本次勾选的设备，其余运行中设备保持原任务</SectionHint>
               </SectionHead>
               <NewTaskForm
+                key={formKey}
                 devices={devices}
+                runningIds={task.deviceIds}
                 onCreate={handleCreate}
-                onPaired={handlePaired}
               />
             </>
           )}
 
-          {tab === "review" && (
+          {tab === "review" && reviewGroup && (
+            <>
+              <SectionHead>
+                <SectionTitle>任务详情与复核</SectionTitle>
+                <SectionHint>
+                  任务 {reviewGroup.taskName} · 批次 {reviewGroup.batch} · {reviewGroup.site}{" "}
+                  {reviewGroup.hall} · 待复核 {reviewGroup.pending} / {reviewGroup.events.length}
+                </SectionHint>
+                <HeadActions>
+                  <SmallBtn type="button" onClick={() => setReviewTaskName(null)}>
+                    ← 返回复核列表
+                  </SmallBtn>
+                </HeadActions>
+              </SectionHead>
+
+              <ReviewGrid>
+                <ReviewCol>
+                  <Card>
+                    <CardHead>
+                      <CardTitle>事件时间线</CardTitle>
+                      <HeadHint>
+                        {reviewGroup.devices.join("、")} · 共 {reviewGroup.events.length} 条
+                      </HeadHint>
+                    </CardHead>
+                    <TimelineBody>
+                      {reviewGroup.events.map((e) => (
+                        <TimelineItem
+                          key={e.id}
+                          type="button"
+                          $active={e.id === reviewEventId}
+                          onClick={() => selectReviewEvent(e)}
+                        >
+                          <TimelineTitle>
+                            {e.time} · {e.action} · {e.conf.toFixed(2)}
+                          </TimelineTitle>
+                          <TimelineMeta>
+                            片段 {e.clip} · {e.evaluable}
+                            {e.status !== "待复核" && (
+                              <span
+                                style={{
+                                  color:
+                                    e.status === "已确认"
+                                      ? HUD.ok
+                                      : e.status === "已驳回"
+                                        ? HUD.danger
+                                        : HUD.gold,
+                                }}
+                              >
+                                {" · "}
+                                {e.status}
+                              </span>
+                            )}
+                          </TimelineMeta>
+                        </TimelineItem>
+                      ))}
+                    </TimelineBody>
+                  </Card>
+
+                  <Card>
+                    <CardHead>
+                      <CardTitle>片段回放</CardTitle>
+                      <HeadHint>{reviewEvent ? reviewEvent.clip : "选择事件后定位片段"}</HeadHint>
+                    </CardHead>
+                    <CardBody>
+                      <ClipStage>
+                        {reviewEvent && (
+                          <ClipTag>
+                            {reviewEvent.time} · {reviewEvent.action}
+                          </ClipTag>
+                        )}
+                        <span>5 秒片段播放器 · 设备时间轴对齐 · 支持逐帧</span>
+                      </ClipStage>
+                    </CardBody>
+                  </Card>
+                </ReviewCol>
+
+                <ReviewCol>
+                  {reviewEvent && (
+                    <>
+                      <Card>
+                        <CardHead>
+                          <CardTitle>复核 · 事件 {reviewEvent.id}</CardTitle>
+                          <HeadHint>
+                            {reviewGroup.current ? "当前任务" : "历史任务"} · {reviewEvent.device}
+                          </HeadHint>
+                        </CardHead>
+                        <ReviewRows>
+                          <ReviewRow>
+                            <ReviewLabel>AI 原判定</ReviewLabel>
+                            <ReviewValue>
+                              <b>
+                                {reviewEvent.action} · 置信度 {reviewEvent.conf.toFixed(2)}
+                              </b>
+                              <ReviewSub>模型 hand-pose-2d · 规则 {reviewEvent.rule}</ReviewSub>
+                              <ReviewSub
+                                style={{
+                                  color: reviewEvent.ai === "违规" ? HUD.orange : HUD.ok,
+                                }}
+                              >
+                                AI 判定{reviewEvent.ai} · {reviewEvent.aiReason}
+                              </ReviewSub>
+                            </ReviewValue>
+                          </ReviewRow>
+                          <ReviewRow>
+                            <ReviewLabel>人工结论</ReviewLabel>
+                            <ReviewValue>
+                              <ConclusionGroup>
+                                <ConclusionBtn
+                                  type="button"
+                                  $tone="ok"
+                                  $active={draftConclusion === "有效"}
+                                  disabled={!canOperate}
+                                  onClick={() => setDraftConclusion("有效")}
+                                >
+                                  有效
+                                </ConclusionBtn>
+                                <ConclusionBtn
+                                  type="button"
+                                  $tone="danger"
+                                  $active={draftConclusion === "无效"}
+                                  disabled={!canOperate}
+                                  onClick={() => setDraftConclusion("无效")}
+                                >
+                                  无效
+                                </ConclusionBtn>
+                                <ConclusionBtn
+                                  type="button"
+                                  $tone="gold"
+                                  $active={draftConclusion === "无法判定"}
+                                  disabled={!canOperate}
+                                  onClick={() => setDraftConclusion("无法判定")}
+                                >
+                                  无法判定
+                                </ConclusionBtn>
+                              </ConclusionGroup>
+                              {!canOperate && (
+                                <ReviewSub>
+                                  只读角色仅可查看，提交复核需 operator 或 admin
+                                </ReviewSub>
+                              )}
+                            </ReviewValue>
+                          </ReviewRow>
+                          <ReviewRow>
+                            <ReviewLabel>备注</ReviewLabel>
+                            <ReviewValue>
+                              <NoteArea
+                                value={draftNote}
+                                placeholder="复核备注（选填）"
+                                aria-label="复核备注"
+                                disabled={!canOperate}
+                                onChange={(ev) => setDraftNote(ev.target.value)}
+                              />
+                            </ReviewValue>
+                          </ReviewRow>
+                        </ReviewRows>
+                        <SaveRow>
+                          <SmallBtn
+                            type="button"
+                            $primary
+                            disabled={!canOperate || draftConclusion === null}
+                            onClick={saveReview}
+                          >
+                            保存复核
+                          </SmallBtn>
+                          <SaveHint>
+                            {canOperate
+                              ? "保存后写入审计 reviewer_id"
+                              : "只读角色不可提交复核"}
+                          </SaveHint>
+                        </SaveRow>
+                      </Card>
+
+                      <Card>
+                        <CardHead>
+                          <CardTitle>评分</CardTitle>
+                          <HeadHint>按设备独立评分 · 人工结论不覆盖原始判定</HeadHint>
+                        </CardHead>
+                        <CardBody>
+                          <MetaGrid>
+                            <Meta>
+                              <span>暂评</span>
+                              <b>{reviewProfile ? reviewProfile.score : "--"}</b>
+                            </Meta>
+                            <Meta>
+                              <span>覆盖率</span>
+                              <b>{reviewProfile ? `${reviewProfile.coverage}%` : "--"}</b>
+                            </Meta>
+                            <Meta>
+                              <span>可评估事件</span>
+                              <b>{reviewGroup.events.length}</b>
+                            </Meta>
+                            <Meta>
+                              <span>版本</span>
+                              <b>v1</b>
+                            </Meta>
+                          </MetaGrid>
+                        </CardBody>
+                      </Card>
+                    </>
+                  )}
+                </ReviewCol>
+              </ReviewGrid>
+            </>
+          )}
+
+          {tab === "review" && !reviewGroup && (
             <>
               <SectionHead>
                 <SectionTitle>事件复核</SectionTitle>
                 <SectionHint>
-                  待复核 {pendingCount} · 已复核 {reviewedCount} · 复核结论与 AI 判定分开保存
+                  待复核 {pendingCount} · 已复核 {reviewedCount} · 按任务名称拆分，覆盖当前与历史任务
                 </SectionHint>
               </SectionHead>
-              <Card>
-                {events.length === 0 ? (
-                  <EmptyNote>当前任务暂无待复核事件</EmptyNote>
-                ) : (
-                  events.map((e) => {
-                    const pending = e.status === "待复核";
-                    return (
-                      <EventRow key={e.id}>
-                        <EventMain>
-                          <EventHead>
-                            <EventTime>{e.time}</EventTime>
-                            <EventDevice>{e.device}</EventDevice>
-                            <EventTask>任务 {deviceTaskNames[e.device] ?? "--"}</EventTask>
-                            <EventTitle>{e.action}</EventTitle>
-                            <Tag
-                              $tone={
-                                e.status === "待复核" ? "gold" : e.status === "已确认" ? "ok" : "danger"
-                              }
-                            >
-                              {e.status}
-                            </Tag>
-                          </EventHead>
-                          <EventMeta>
-                            置信度 {e.conf.toFixed(2)} · {e.rule} · {e.evaluable} · 片段{" "}
-                            {e.clip}
-                          </EventMeta>
-                          <EventAi $bad={e.ai === "违规"}>
-                            AI 判定{e.ai} · {e.aiReason}
-                          </EventAi>
-                          {!pending && (
-                            <EventMeta>
-                              复核：{e.reviewer}
-                              {e.note ? ` · ${e.note}` : ""}
-                            </EventMeta>
-                          )}
-                        </EventMain>
-                        {pending && (
-                          <EventSide>
-                            <NoteInput
-                              value={e.note}
-                              placeholder="复核备注（选填）"
-                              aria-label={`${e.device} ${e.time} 复核备注`}
-                              onChange={(ev) => updateEvent(e.id, { note: ev.target.value })}
-                            />
-                            <RowActions>
-                              <SmallBtn
-                                type="button"
-                                $primary
-                                onClick={() => updateEvent(e.id, { status: "已确认", reviewer: task.operator })}
-                              >
-                                确认
-                              </SmallBtn>
-                              <SmallBtn
-                                type="button"
-                                $danger
-                                onClick={() => updateEvent(e.id, { status: "已驳回", reviewer: task.operator })}
-                              >
-                                驳回
-                              </SmallBtn>
-                            </RowActions>
-                          </EventSide>
-                        )}
-                      </EventRow>
-                    );
-                  })
-                )}
-              </Card>
+              {eventGroups.length === 0 ? (
+                <Card>
+                  <EmptyNote>暂无复核事件</EmptyNote>
+                </Card>
+              ) : (
+                eventGroups.map((group) => {
+                  const open = Boolean(expandedTasks[group.taskName]);
+                  return (
+                    <Card key={group.taskName}>
+                      <GroupHeadRow>
+                        <GroupToggle
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => toggleTask(group.taskName)}
+                        >
+                          <Caret $open={open} aria-hidden="true">
+                            ▸
+                          </Caret>
+                          <GroupHeadMain>
+                            <GroupTitleRow>
+                              <GroupName>{group.taskName}</GroupName>
+                              <Tag $tone={group.current ? "ok" : "dim"}>
+                                {group.current ? "当前任务" : "历史任务"}
+                              </Tag>
+                              <Tag $tone={group.pending ? "gold" : "dim"}>
+                                待复核 {group.pending}
+                              </Tag>
+                              <Tag $tone="dim">已复核 {group.reviewed}</Tag>
+                            </GroupTitleRow>
+                            <GroupMeta>
+                              批次 {group.batch} · {group.site} {group.hall} ·{" "}
+                              {group.devices.join("、")} · 共 {group.events.length} 条事件
+                            </GroupMeta>
+                          </GroupHeadMain>
+                        </GroupToggle>
+                        <ReviewLink type="button" onClick={() => openReview(group)}>
+                          逐条复核 ›
+                        </ReviewLink>
+                      </GroupHeadRow>
+                      {open && (
+                        <EventList>
+                          {group.events.map((e) => (
+                            <EventRow key={e.id}>
+                              <EventHead>
+                                <EventTime>{e.time}</EventTime>
+                                <EventDevice>{e.device}</EventDevice>
+                                <EventTitle>{e.action}</EventTitle>
+                                <Tag
+                                  $tone={
+                                    e.status === "待复核"
+                                      ? "gold"
+                                      : e.status === "已确认"
+                                        ? "ok"
+                                        : e.status === "无法判定"
+                                          ? "dim"
+                                          : "danger"
+                                  }
+                                  style={{ marginLeft: "auto" }}
+                                >
+                                  {e.status}
+                                </Tag>
+                              </EventHead>
+                              <EventMeta>
+                                置信度 {e.conf.toFixed(2)} · {e.rule} · {e.evaluable} · 片段{" "}
+                                {e.clip}
+                              </EventMeta>
+                              {e.status !== "待复核" ? (
+                                <EventMeta>
+                                  复核：{e.reviewer}
+                                  {e.note ? ` · ${e.note}` : ""}
+                                </EventMeta>
+                              ) : (
+                                !canOperate && (
+                                  <EventMeta>待复核 · 只读角色仅可查看</EventMeta>
+                                )
+                              )}
+                            </EventRow>
+                          ))}
+                        </EventList>
+                      )}
+                    </Card>
+                  );
+                })
+              )}
             </>
           )}
 
@@ -2052,6 +2938,19 @@ export default function TaskInfoPage({
               <Card>
                 <CardBody>
                   <FilterBar>
+                    <FilterInput
+                      value={filterBatch}
+                      placeholder="批次，如 B-1118"
+                      aria-label="按批次筛选"
+                      onChange={(e) => setFilterBatch(e.target.value)}
+                    />
+                    <FilterInput
+                      value={filterQuery}
+                      placeholder="搜索任务名称 / 负责人"
+                      aria-label="搜索任务"
+                      onChange={(e) => setFilterQuery(e.target.value)}
+                      style={{ width: 190 }}
+                    />
                     <FilterSelect
                       value={filterSite}
                       aria-label="按场区筛选"
@@ -2062,19 +2961,13 @@ export default function TaskInfoPage({
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </FilterSelect>
-                    <FilterInput
-                      value={filterBatch}
-                      placeholder="批次，如 B-1118"
-                      aria-label="按批次筛选"
-                      onChange={(e) => setFilterBatch(e.target.value)}
-                    />
                     <FilterSelect
                       value={filterDevice}
                       aria-label="按设备筛选"
                       onChange={(e) => setFilterDevice(e.target.value)}
                     >
                       <option value="全部设备">全部设备</option>
-                      {INITIAL_DEVICES.map((d) => (
+                      {devices.map((d) => (
                         <option key={d.id} value={d.id}>{d.id}</option>
                       ))}
                     </FilterSelect>
@@ -2085,6 +2978,7 @@ export default function TaskInfoPage({
                         <tr>
                           <th>批次</th>
                           <th>任务名称</th>
+                          <th>负责人</th>
                           <th>场区 · 栋舍</th>
                           <th className="col-sm-hide">开始时间</th>
                           <th className="col-sm-hide">时长</th>
@@ -2101,6 +2995,7 @@ export default function TaskInfoPage({
                           >
                             <td><MonoCell>{h.batch}</MonoCell></td>
                             <td>{h.name}</td>
+                            <td>{h.operator}</td>
                             <td>{h.site} · {h.hall}</td>
                             <td className="col-sm-hide"><MonoCell>{h.startAt}</MonoCell></td>
                             <td className="col-sm-hide"><MonoCell>{h.duration}</MonoCell></td>
@@ -2114,7 +3009,7 @@ export default function TaskInfoPage({
                         ))}
                         {filteredHistory.length === 0 && (
                           <tr>
-                            <td colSpan={7}>
+                            <td colSpan={8}>
                               <EmptyNote style={{ padding: "14px 0" }}>没有符合条件的任务</EmptyNote>
                             </td>
                           </tr>
@@ -2128,6 +3023,8 @@ export default function TaskInfoPage({
           )}
         </ContentInner>
       </Content>
+
+      <AttachmentDialog attachment={preview} onClose={() => setPreview(null)} />
     </Page>
   );
 }
