@@ -1,5 +1,7 @@
 import { WS_TOPICS } from "../contracts/api.ts";
+import type { Command } from "../contracts/types.ts";
 import type { Repositories } from "../repos/index.ts";
+import { publishCommandResult } from "./command-events.ts";
 import type { Hub } from "./hub.ts";
 
 /** 建议设备每 5 秒心跳一次；离线阈值留出 3 个周期，容忍偶发丢包。 */
@@ -86,6 +88,69 @@ export function createOfflineSweeper(
           );
         }
       }, heartbeatIntervalMs);
+      timer.unref();
+    },
+    stop() {
+      if (timer === null) return;
+      clearInterval(timer);
+      timer = null;
+    },
+    run,
+  };
+}
+
+/** 指令超时轮询间隔默认 1 秒；指令 TTL 最短 1 秒，轮询再慢会让终态延迟明显。 */
+export const DEFAULT_COMMAND_SWEEP_INTERVAL_MS = 1_000;
+
+export interface CommandSweeperOptions {
+  intervalMs?: number;
+  logger?: (message: string) => void;
+}
+
+export interface CommandSweeper {
+  readonly intervalMs: number;
+  start(): void;
+  stop(): void;
+  /** 立即执行一次超时改判；返回本次改判的指令 */
+  run(): Command[];
+}
+
+/**
+ * 指令超时判定：超过 expires_at 仍为 accepted 的指令改判 timeout，
+ * 并向 command.result 订阅者推送。
+ */
+export function createCommandSweeper(
+  repos: Repositories,
+  hub: Hub,
+  options: CommandSweeperOptions = {},
+): CommandSweeper {
+  const intervalMs = options.intervalMs ?? DEFAULT_COMMAND_SWEEP_INTERVAL_MS;
+  if (intervalMs <= 0) throw new Error("commandSweepIntervalMs 必须大于 0");
+
+  let timer: NodeJS.Timeout | null = null;
+
+  function run(): Command[] {
+    const expired = repos.commands.expireOverdueCommands();
+    for (const command of expired) publishCommandResult(hub, command);
+    if (expired.length > 0) {
+      options.logger?.(`${expired.length} 条指令超时，已改判 timeout`);
+    }
+    return expired;
+  }
+
+  return {
+    intervalMs,
+    start() {
+      if (timer !== null) return;
+      timer = setInterval(() => {
+        try {
+          run();
+        } catch (error) {
+          options.logger?.(
+            `指令超时判定失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }, intervalMs);
       timer.unref();
     },
     stop() {

@@ -63,9 +63,10 @@ data/               默认数据库与上传目录（不提交）
 | `HELMET_HUB_TOKEN` | 未设置 | 设置后 `/api` 与 `/ws` 需 Bearer 令牌；持令牌者按部署方 `admin` 记录审计 |
 | `HELMET_HUB_AUTH` | 开启 | 设为 `off` 关闭三角色鉴权，回到免登录演示路径 |
 | `HELMET_HUB_JWT_SECRET` | 随机生成 | 访问令牌签名密钥，至少 32 字符；不设则每次重启令牌全失效 |
-| `HELMET_HUB_DEVICE_TOKEN` | 未设置 | 设置后设备注册与心跳接口（`/api/devices/register`、`/api/devices/:id/heartbeat`）必须携带 `X-Device-Token` |
+| `HELMET_HUB_DEVICE_TOKEN` | 未设置 | 设置后设备注册、心跳与指令回执（`/api/devices/register`、`/api/devices/:id/heartbeat`、`/api/commands/:id/result`）必须携带 `X-Device-Token` |
 | `HELMET_HUB_HEARTBEAT_INTERVAL_MS` | `5000` | 建议心跳间隔，随注册/心跳响应下发 |
 | `HELMET_HUB_OFFLINE_TIMEOUT_MS` | `15000` | 超过该时长未心跳判离线 |
+| `HELMET_HUB_COMMAND_SWEEP_INTERVAL_MS` | `1000` | 指令超时判定轮询间隔 |
 
 设备侧接入示例（与用户登录互不影响）：
 
@@ -79,6 +80,11 @@ curl -X POST http://127.0.0.1:8080/api/devices/edge-01/heartbeat \
   -H 'Content-Type: application/json' \
   -H 'X-Device-Token: <设备令牌>' \
   -d '{"battery_pct":86,"wifi":{"connected":true,"ssid":"SY-FIELD-A","rssi_dbm":-52},"hub_reachable":true,"cloud_reachable":false,"task_state":"recording","storage_free_bytes":31204147200,"state_version":7}'
+
+curl -X POST http://127.0.0.1:8080/api/commands/<指令ID>/result \
+  -H 'Content-Type: application/json' \
+  -H 'X-Device-Token: <设备令牌>' \
+  -d '{"device_id":"edge-01","state":"completed"}'
 ```
 
 ## 使用

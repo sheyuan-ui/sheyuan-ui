@@ -16,7 +16,10 @@ export const API = {
   deviceRegister: "/api/devices/register",
   /** 设备侧：心跳上报 */
   deviceHeartbeat: (id: string) => `/api/devices/${id}/heartbeat`,
-  pairCode: "/api/devices/pair-code",
+  /** 设备码库：管理员登记的白名单，一台设备一个码 */
+  deviceCodes: "/api/device-codes",
+  deviceCode: (code: string) => `/api/device-codes/${code}`,
+  /** 扫到设备码后按库配对；命中才建立连接 */
   pair: "/api/devices/pair",
   previewOffer: (deviceId: string) => `/api/devices/${deviceId}/preview/offer`,
 

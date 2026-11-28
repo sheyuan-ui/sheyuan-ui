@@ -118,7 +118,13 @@ before(async () => {
   seedDemo(createRepositories(db));
 
   uploadDir = await mkdtemp(join(tmpdir(), "helmet-hub-uploads-"));
-  app = createHelmetServer({ db, uploadDir, logger: () => {} });
+  app = createHelmetServer({
+    db,
+    uploadDir,
+    logger: () => {},
+    // 定时器不自动触发，测试手动调用 commandSweeper.run()
+    commandSweepIntervalMs: 60_000,
+  });
   const address = await app.listen(0, "127.0.0.1");
   baseUrl = `http://127.0.0.1:${address.port}`;
   wsUrl = `ws://127.0.0.1:${address.port}/ws`;
@@ -166,28 +172,80 @@ describe("响应外壳与请求 ID", () => {
 });
 
 describe("设备与配对", () => {
-  test("签发配对码后配对一次成功，再次使用返回 409", async () => {
-    const issued = await postJson(
-      "/api/devices/pair-code",
-      { device_id: "edge-api-pair", code: "4321" },
-      "pair-code-1",
+  test("设备码在库中才能配对，未登记返回 404", async () => {
+    const registered = await postJson("/api/devices/register", {
+      device_id: "edge-api-pair",
+      model: "SY-Helmet Edge",
+      firmware_version: "v1.4.2",
+    });
+    assert.ok(registered.status === 200 || registered.status === 201);
+
+    const created = await postJson(
+      "/api/device-codes",
+      { code: "SY-HAP-0D7BED", device_id: "edge-api-pair" },
+      "device-code-1",
     );
-    assert.equal(issued.status, 201);
-    const pairCode = issued.body.data as { code: string; expires_at: string };
-    assert.equal(pairCode.code, "4321");
-    assert.ok(pairCode.expires_at > (issued.body.data as { issued_at: string }).issued_at);
+    assert.equal(created.status, 201);
+    assert.equal((created.body.data as { code: string }).code, "SY-HAP-0D7BED");
 
-    const paired = await postJson("/api/devices/pair", { code: "4321" }, "pair-1");
+    const unknown = await postJson(
+      "/api/devices/pair",
+      { device_code: "SY-HAP-NOTFOUND" },
+      "pair-0",
+    );
+    assert.equal(unknown.status, 404);
+    assert.equal(unknown.body.code, "NOT_FOUND");
+
+    const paired = await postJson(
+      "/api/devices/pair",
+      { device_code: "SY-HAP-0D7BED" },
+      "pair-1",
+    );
     assert.equal(paired.status, 200);
-    assert.deepEqual(paired.body.data, { device_id: "edge-api-pair", pair_status: "paired" });
-
-    const again = await postJson("/api/devices/pair", { code: "4321" }, "pair-2");
-    assert.equal(again.status, 409);
-    assert.equal(again.body.code, "CONFLICT");
+    assert.deepEqual(paired.body.data, {
+      device_id: "edge-api-pair",
+      pair_status: "paired",
+      device_code: "SY-HAP-0D7BED",
+    });
 
     const detail = await call("/api/devices/edge-api-pair");
-    assert.equal(detail.status, 200);
-    assert.equal((detail.body.data as { pair_status: string }).pair_status, "paired");
+    const summary = detail.body.data as { pair_status: string; device_code: string };
+    assert.equal(summary.pair_status, "paired");
+    assert.equal(summary.device_code, "SY-HAP-0D7BED");
+  });
+
+  test("移除设备码同时断开绑定设备，重复移除返回 404", async () => {
+    await postJson("/api/devices/register", {
+      device_id: "edge-api-remove",
+      model: "SY-Helmet Edge",
+      firmware_version: "v1.4.2",
+    });
+    const created = await postJson(
+      "/api/device-codes",
+      { code: "SY-HRM-0D7BED", device_id: "edge-api-remove" },
+      "device-code-rm-1",
+    );
+    assert.equal(created.status, 201);
+
+    await postJson("/api/devices/pair", { device_code: "SY-HRM-0D7BED" }, "pair-rm-1");
+
+    const removed = await call("/api/device-codes/SY-HRM-0D7BED", {
+      method: "DELETE",
+      headers: { "idempotency-key": "device-code-rm-del-1" },
+    });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(removed.body.data, { code: "SY-HRM-0D7BED", device_id: "edge-api-remove" });
+
+    const detail = await call("/api/devices/edge-api-remove");
+    const summary = detail.body.data as { pair_status: string; device_code: string | null };
+    assert.equal(summary.pair_status, "unpaired");
+    assert.equal(summary.device_code, null);
+
+    const again = await call("/api/device-codes/SY-HRM-0D7BED", {
+      method: "DELETE",
+      headers: { "idempotency-key": "device-code-rm-del-2" },
+    });
+    assert.equal(again.status, 404);
   });
 
   test("不存在的设备返回 404", async () => {
@@ -425,6 +483,153 @@ describe("指令与乐观锁", () => {
       "command-create-3",
     );
     assert.equal(unknown.status, 404);
+  });
+
+  test("设备回执写终态并推送 command.result，重复回执幂等", async () => {
+    const created = await postJson(
+      "/api/commands",
+      {
+        device_id: DEMO_IDS.device,
+        session_id: DEMO_IDS.session,
+        expected_state_version: 42,
+        action: "snapshot",
+        ttl_ms: 60_000,
+      },
+      "command-result-create-1",
+    );
+    assert.equal(created.status, 201);
+    const commandId = (created.body.data as { command_id: string }).command_id;
+
+    const socket = new WebSocket(`${wsUrl}?topics=command.result`);
+    try {
+      const ready = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        socket.once("message", (raw) => resolve(JSON.parse(raw.toString())));
+        socket.once("error", reject);
+      });
+      assert.deepEqual(ready.topics, ["command.result"]);
+
+      const pushed = waitForMessage(socket, (message) => {
+        if (message.topic !== "command.result") return false;
+        return (message.data as { command_id: string }).command_id === commandId;
+      });
+
+      const ackBody = {
+        device_id: DEMO_IDS.device,
+        state: "completed",
+        finished_at: "2026-11-27T10:00:00Z",
+      };
+      const ack = await postJson(`/api/commands/${commandId}/result`, ackBody);
+      assert.equal(ack.status, 200);
+      const done = ack.body.data as {
+        result: { state: string; finished_at: string };
+      };
+      assert.equal(done.result.state, "completed");
+      assert.equal(done.result.finished_at, "2026-11-27T10:00:00.000Z");
+
+      const pushedMessage = await pushed;
+      const pushedData = pushedMessage.data as {
+        command_id: string;
+        result: { state: string };
+      };
+      assert.equal(pushedData.command_id, commandId);
+      assert.equal(pushedData.result.state, "completed");
+
+      const replay = await postJson(`/api/commands/${commandId}/result`, ackBody);
+      assert.equal(replay.status, 200);
+      assert.deepEqual(replay.body.data, ack.body.data);
+
+      const conflict = await postJson(`/api/commands/${commandId}/result`, {
+        device_id: DEMO_IDS.device,
+        state: "failed",
+        message: "设备侧执行失败",
+      });
+      assert.equal(conflict.status, 409);
+      assert.equal(conflict.body.code, "CONFLICT");
+      assert.equal((conflict.body.details as Record<string, string>).current_state, "completed");
+
+      const audits = createRepositories(db)
+        .audit.listByTarget("command", commandId)
+        .filter((entry) => entry.action === "command.result");
+      assert.equal(audits.length, 1);
+
+      const stored = createRepositories(db).commands.get(commandId);
+      assert.equal(stored?.result.state, "completed");
+    } finally {
+      socket.close();
+    }
+  });
+
+  test("回执参数非法或归属不符被拒绝", async () => {
+    const created = await postJson(
+      "/api/commands",
+      {
+        device_id: DEMO_IDS.device,
+        expected_state_version: 42,
+        action: "sync_time",
+        ttl_ms: 60_000,
+      },
+      "command-result-create-2",
+    );
+    const commandId = (created.body.data as { command_id: string }).command_id;
+
+    const accepted = await postJson(`/api/commands/${commandId}/result`, {
+      device_id: DEMO_IDS.device,
+      state: "accepted",
+    });
+    assert.equal(accepted.status, 400);
+    assert.equal(accepted.body.code, "INVALID_ARGUMENT");
+
+    const timeout = await postJson(`/api/commands/${commandId}/result`, {
+      device_id: DEMO_IDS.device,
+      state: "timeout",
+    });
+    assert.equal(timeout.status, 400);
+
+    const wrongDevice = await postJson(`/api/commands/${commandId}/result`, {
+      device_id: "edge-other",
+      state: "completed",
+    });
+    assert.equal(wrongDevice.status, 400);
+    assert.equal(wrongDevice.body.code, "INVALID_ARGUMENT");
+
+    const missing = await postJson("/api/commands/cmd-missing/result", {
+      device_id: DEMO_IDS.device,
+      state: "completed",
+    });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.code, "NOT_FOUND");
+
+    const stored = createRepositories(db).commands.get(commandId);
+    assert.equal(stored?.result.state, "accepted");
+  });
+
+  test("超过 expires_at 的指令由 sweeper 改判 timeout 并推送", async () => {
+    const repos = createRepositories(db);
+    const now = Date.now();
+    repos.commands.create({
+      command_id: "cmd-expire-api-1",
+      device_id: DEMO_IDS.device,
+      session_id: null,
+      expected_state_version: 0,
+      action: "reboot",
+      issued_at: new Date(now - 3_000).toISOString(),
+      expires_at: new Date(now - 1_000).toISOString(),
+      result: { state: "accepted", code: null, message: null, finished_at: null },
+    });
+
+    const expired = app.commandSweeper.run();
+    assert.ok(expired.some((command) => command.command_id === "cmd-expire-api-1"));
+
+    const stored = repos.commands.get("cmd-expire-api-1");
+    assert.equal(stored?.result.state, "timeout");
+    assert.notEqual(stored?.result.finished_at, null);
+
+    const late = await postJson("/api/commands/cmd-expire-api-1/result", {
+      device_id: DEMO_IDS.device,
+      state: "completed",
+    });
+    assert.equal(late.status, 409);
+    assert.equal((late.body.details as Record<string, string>).current_state, "timeout");
   });
 });
 

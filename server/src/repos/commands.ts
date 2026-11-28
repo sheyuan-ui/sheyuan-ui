@@ -90,6 +90,7 @@ export class CommandRepository {
   /**
    * 回报执行结果。已进入终态（completed/rejected/timeout/failed）的指令不再改写，
    * 重复回执按幂等处理直接返回当前值。
+   * UPDATE 带 result_state = 'accepted' 条件，避免与超时 sweeper 并发时覆盖终态。
    */
   setResult(commandId: string, result: CommandResult): Command {
     const current = this.get(commandId);
@@ -99,7 +100,7 @@ export class CommandRepository {
     this.db
       .prepare(
         `UPDATE command SET result_state = ?, result_code = ?, result_message = ?, finished_at = ?
-         WHERE command_id = ?`,
+         WHERE command_id = ? AND result_state = 'accepted'`,
       )
       .run(
         result.state,
@@ -114,17 +115,35 @@ export class CommandRepository {
     return updated;
   }
 
+  /** 超过 expires_at 仍为 accepted 的指令改判 timeout；返回改判后的指令，供推送使用。 */
+  expireOverdueCommands(at: string = nowIso()): Command[] {
+    const now = toIso(at);
+    const rows = this.db
+      .prepare("SELECT * FROM command WHERE result_state = 'accepted' AND expires_at < ?")
+      .all(now) as unknown as CommandRow[];
+    if (rows.length === 0) return [];
+
+    this.db
+      .prepare(
+        `UPDATE command SET result_state = 'timeout', finished_at = ?
+         WHERE result_state = 'accepted' AND expires_at < ?`,
+      )
+      .run(now, now);
+
+    return rows.map((row) =>
+      toCommand({
+        ...row,
+        result_state: "timeout",
+        result_code: null,
+        result_message: null,
+        finished_at: now,
+      }),
+    );
+  }
+
   /** 超过 expires_at 仍为 accepted 的指令改判 timeout；返回处理条数。 */
   expireOverdue(at: string = nowIso()): number {
-    const now = toIso(at);
-    return Number(
-      this.db
-        .prepare(
-          `UPDATE command SET result_state = 'timeout', finished_at = ?
-           WHERE result_state = 'accepted' AND expires_at < ?`,
-        )
-        .run(now, now).changes,
-    );
+    return this.expireOverdueCommands(at).length;
   }
 
   listByDevice(deviceId: string, limit = 50): Command[] {

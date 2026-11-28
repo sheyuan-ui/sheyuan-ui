@@ -17,7 +17,8 @@ export { CommandRepository } from "./commands.ts";
 export {
   DeviceRepository,
   type DeviceRecord,
-  type PairCodeResult,
+  type DeviceCodeRecord,
+  type PairByCodeResult,
   type PairStatus,
 } from "./devices.ts";
 export { EvaluationRepository } from "./evaluations.ts";

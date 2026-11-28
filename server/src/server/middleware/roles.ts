@@ -8,6 +8,7 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const DEVICE_ROUTES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "POST", pattern: /^\/api\/devices\/register$/ },
   { method: "POST", pattern: /^\/api\/devices\/[^/]+\/heartbeat$/ },
+  { method: "POST", pattern: /^\/api\/commands\/[^/]+\/result$/ },
 ];
 
 /** 设备侧接口：由设备令牌鉴权，不参与人账号角色矩阵 */
@@ -19,7 +20,7 @@ export function isDeviceRoute(method: string, pathname: string): boolean {
 /**
  * 三角色矩阵（集中一处，避免每个路由各写一份）：
  * - 登录 / 刷新：公开；
- * - 设备注册 / 心跳：设备令牌；
+ * - 设备注册 / 心跳 / 指令回执：设备令牌；
  * - 审计查询：admin；
  * - 其余读写：GET 需 viewer，写操作需 operator；admin 自动满足。
  */

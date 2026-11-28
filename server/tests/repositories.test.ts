@@ -118,19 +118,43 @@ describe("设备状态与配对", () => {
     assert.equal(device?.pair_status, "unpaired");
   });
 
-  test("配对码一次性、会过期，成功即置为已配对", () => {
+  test("设备码登记唯一，扫到码命中才配对，移除后断开", () => {
     repos.devices.register("edge-09");
-    const issued = repos.devices.issuePairCode("edge-09", "1234");
-    assert.equal(issued.expires_at, toIso(new Date(new Date(issued.issued_at).getTime() + 120_000)));
+    const registered = repos.devices.registerDeviceCode("SY-H09-ABCDEF", "edge-09");
+    assert.equal(registered.code, "SY-H09-ABCDEF");
+    assert.equal(registered.pair_status, "unpaired");
+    assert.throws(() => repos.devices.registerDeviceCode("SY-H09-ABCDEF"), /已在库中/);
 
-    assert.deepEqual(repos.devices.consumePairCode("1234"), { ok: true, device_id: "edge-09" });
-    assert.deepEqual(repos.devices.consumePairCode("1234"), { ok: false, reason: "consumed" });
+    assert.deepEqual(repos.devices.pairByDeviceCode("SY-H09-ABCDEF"), {
+      ok: true,
+      device_id: "edge-09",
+      device_code: "SY-H09-ABCDEF",
+    });
     assert.equal(repos.devices.getDevice("edge-09")?.pair_status, "paired");
+    // 设备码是持久身份，重复配对仍成功
+    assert.equal(repos.devices.pairByDeviceCode("SY-H09-ABCDEF").ok, true);
 
-    const past = new Date(Date.now() - 60_000).toISOString();
-    repos.devices.issuePairCode("edge-09", "5678", 1_000, past);
-    assert.deepEqual(repos.devices.consumePairCode("5678"), { ok: false, reason: "expired" });
-    assert.deepEqual(repos.devices.consumePairCode("0000"), { ok: false, reason: "not_found" });
+    // 未登记的码不能配对
+    assert.deepEqual(repos.devices.pairByDeviceCode("SY-H99-000000"), {
+      ok: false,
+      reason: "not_found",
+    });
+
+    // 未绑定设备的码，扫码时用读到的设备号绑定
+    repos.devices.register("edge-10");
+    repos.devices.registerDeviceCode("SY-H10-ABCDEF");
+    assert.deepEqual(repos.devices.pairByDeviceCode("SY-H10-ABCDEF", "edge-10"), {
+      ok: true,
+      device_id: "edge-10",
+      device_code: "SY-H10-ABCDEF",
+    });
+
+    // 移除设备码即断开该设备
+    assert.deepEqual(repos.devices.removeDeviceCode("SY-H09-ABCDEF"), {
+      code: "SY-H09-ABCDEF",
+      device_id: "edge-09",
+    });
+    assert.equal(repos.devices.getDevice("edge-09")?.pair_status, "unpaired");
   });
 });
 
