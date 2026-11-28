@@ -1,8 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { keyframes, styled } from "@mui/material/styles";
 import { HUD } from "../../theme/theme";
 import { useNotification } from "../../contexts/NotificationContext";
 import type { Role } from "../../api";
+import { isApiRequestError } from "../../api/errors";
+import { USE_MOCK } from "../../api/client";
+import { createJob, dispatchStartJob, fetchJobHistory } from "../../api/jobs";
+import { useDevicesFeed } from "../../api/useDevices";
+import { useRequest } from "../../api/useRequest";
+import type { Job, Session } from "../../contracts/types";
+import AsyncState from "../AsyncState/AsyncState";
 import NewTaskForm, {
   type DeviceOption,
   type NewTaskInput,
@@ -231,6 +238,8 @@ interface HistoryTask {
 }
 
 /** 每台设备各自一条任务，任务名 = 下发时刻-设备号 */
+const EMPTY_HISTORY: HistoryTask[] = [];
+
 const INITIAL_HISTORY: HistoryTask[] = [
   {
     id: "T-20261119-002-01",
@@ -664,8 +673,22 @@ function buildSessions(
   taskNames: Record<string, string>,
   recorded: Record<string, number>,
   operator: string,
+  live = false,
 ): SessionRow[] {
   return deviceIds.map((id, i) => {
+    if (live) {
+      return {
+        device: id,
+        taskName: taskNames[id] ?? id,
+        operator,
+        status: "运行中",
+        score: null,
+        grabs: 0,
+        valid: 0,
+        coverage: null,
+        recorded: recorded[id] ?? 0,
+      };
+    }
     const profile = scoreFor(id);
     return {
       device: id,
@@ -693,6 +716,115 @@ function buildHistorySessions(task: HistoryTask): SessionRow[] {
     coverage: task.score === null ? null : Math.max((task.coverage ?? 0) - i * 2, 0),
     recorded: durationToSeconds(task.duration),
   }));
+}
+
+const JOB_STATUS_LABEL: Record<Job["status"], string> = {
+  created: "待下发",
+  dispatched: "已下发",
+  running: "进行中",
+  paused: "已暂停",
+  completed: "已完成",
+  cancelled: "已取消",
+};
+
+const SESSION_STATUS_LABEL: Record<Session["status"], string> = {
+  active: "进行中",
+  ended: "已完成",
+  aborted: "已中止",
+};
+
+/** UTC ISO → 页面用的本地日期、开始时间、任务名时间戳 */
+const localStamp = (iso: string) => {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) {
+    return { date: "--", startAt: "--", stamp: "--------" };
+  }
+  const startAt = `${pad2(at.getMonth() + 1)}-${pad2(at.getDate())} ${clock(at)}`;
+  return {
+    date: `${at.getFullYear()}-${pad2(at.getMonth() + 1)}-${pad2(at.getDate())}`,
+    startAt,
+    stamp: `${ymd(at)}-${clock(at).replace(":", "")}`,
+  };
+};
+
+const secondsBetween = (from: string, to: string) => {
+  const ms = Date.parse(to) - Date.parse(from);
+  return Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : null;
+};
+
+const parseGeoInput = (text: string) => {
+  if (!text.trim()) return null;
+  const [latRaw, lngRaw] = text.split(",");
+  const lat = Number(latRaw);
+  const lng = Number(lngRaw);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return {
+    lat,
+    lng,
+    accuracy_m: 0,
+    source: "manual" as const,
+    captured_at: new Date().toISOString(),
+  };
+};
+
+const errorText = (error: unknown) =>
+  isApiRequestError(error) ? error.message : "请稍后重试";
+
+/** 服务端 Job/Session → 历史任务行；没有会话的任务也保留一行，设备列为空 */
+function historyFromJobs(jobs: Job[], sessions: Session[]): HistoryTask[] {
+  const rows: HistoryTask[] = [];
+  for (const job of jobs) {
+    const at = localStamp(job.created_at);
+    const site = job.location.farm_name || job.farm_id;
+    const hall = job.location.house_name || job.location.house_id;
+    const own = sessions.filter((s) => s.job_id === job.job_id);
+    const base = {
+      site,
+      hall,
+      batch: job.batch_id,
+      operator: job.owner_name,
+      date: at.date,
+      startAt: at.startAt,
+      attachments: job.attachment_ids,
+    };
+
+    if (own.length === 0) {
+      rows.push({
+        ...base,
+        id: job.job_id,
+        name: at.stamp,
+        deviceIds: [],
+        duration: "--",
+        score: null,
+        coverage: null,
+        status: JOB_STATUS_LABEL[job.status],
+      });
+      continue;
+    }
+
+    for (const session of own) {
+      const started = localStamp(session.started_at);
+      const elapsed = session.ended_at
+        ? secondsBetween(session.started_at, session.ended_at)
+        : null;
+      rows.push({
+        ...base,
+        id: `${job.job_id}:${session.session_id}`,
+        name: `${started.stamp}-${deviceNo(session.device_id)}`,
+        date: started.date,
+        startAt: started.startAt,
+        deviceIds: [session.device_id],
+        duration: elapsed === null ? "--" : formatDuration(elapsed),
+        score: session.score.value,
+        coverage:
+          session.score.coverage === null
+            ? null
+            : Math.round(session.score.coverage * 100),
+        status: SESSION_STATUS_LABEL[session.status],
+      });
+    }
+  }
+  return rows;
 }
 
 function exportCsv(task: HistoryTask) {
@@ -1909,7 +2041,7 @@ interface TaskInfoPageProps {
   hidden?: boolean;
   /** 当前登录角色：viewer 只读，operator 可下发/复核，admin 另有顶部「设置」页 */
   role: Role;
-  /** 全局设备注册表；配对页连接成功后这里同步更新 */
+  /** 全局设备注册表；配对页配对成功后这里同步更新 */
   devices: DeviceOption[];
   /** 自增信号：变化时切到新建任务 */
   newTaskSignal?: number;
@@ -1918,11 +2050,27 @@ interface TaskInfoPageProps {
 export default function TaskInfoPage({
   hidden = false,
   role,
-  devices,
+  devices: registeredDevices,
   newTaskSignal,
 }: TaskInfoPageProps) {
   const { notify } = useNotification();
   const canOperate = role !== "viewer";
+  /** 真实模式用服务端设备列表；演示模式沿用全局注册表 */
+  const feed = useDevicesFeed(!USE_MOCK);
+  const devices = useMemo<DeviceOption[]>(() => {
+    if (USE_MOCK) return registeredDevices;
+    return (feed.devices ?? []).map((item) => ({
+      id: item.device_id,
+      alias: item.alias ?? undefined,
+      online: item.runtime.state !== "offline",
+      paired: item.pair_status === "paired",
+      state: item.runtime.state,
+    }));
+  }, [registeredDevices, feed.devices]);
+  const summaries = useMemo(
+    () => new Map((feed.devices ?? []).map((item) => [item.device_id, item])),
+    [feed.devices],
+  );
   /** 已配对设备集合：运行任务只能挂在已配对设备上，未配对的存档任务视为失效 */
   const pairedIds = useMemo(
     () => new Set(devices.filter((d) => d.paired).map((d) => d.id)),
@@ -1947,8 +2095,21 @@ export default function TaskInfoPage({
   const [startedAt] = useState(() => new Date());
   const [tab, setTab] = useState<TaskTab>("current");
   const [task, setTask] = useState<CurrentTask>(() => boot?.task ?? createInitialTask(startedAt));
-  const [history] = useState<HistoryTask[]>(INITIAL_HISTORY);
-  const [events, setEvents] = useState<ReviewEvent[]>(INITIAL_EVENTS);
+  const historyReq = useRequest(
+    async (signal) => {
+      const data = await fetchJobHistory(signal);
+      return historyFromJobs(data.jobs.items, data.sessions.items);
+    },
+    { enabled: !USE_MOCK },
+  );
+  const history = useMemo(
+    () => (USE_MOCK ? INITIAL_HISTORY : (historyReq.data ?? EMPTY_HISTORY)),
+    [historyReq.data],
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [events, setEvents] = useState<ReviewEvent[]>(() =>
+    USE_MOCK ? INITIAL_EVENTS : [],
+  );
   const [elapsed, setElapsed] = useState(() =>
     boot
       ? boot.elapsed + Math.max(0, Math.floor((Date.now() - boot.savedAt) / 1000))
@@ -1984,8 +2145,36 @@ export default function TaskInfoPage({
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
   /** 当前查看评分的设备；未选时取第一台 */
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
-  /** 每次进入新建任务都重建表单，默认参与设备取当前在线已连接设备 */
+  /** 每次进入新建任务都重建表单，默认参与设备取当前在线已配对设备 */
   const [formKey, setFormKey] = useState(0);
+
+  /**
+   * 真实模式首帧还没有设备列表，等第一次设备数据到位后再恢复上次运行任务，
+   * 否则刷新后当前任务会被误判成“没有已接入设备”。
+   */
+  const restoredRef = useRef(USE_MOCK);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    if (feed.devices === null) return;
+    restoredRef.current = true;
+    const stored = loadTaskState();
+    if (!stored) return;
+    const ids = stored.task.deviceIds.filter((id) => pairedIds.has(id));
+    if (ids.length === 0) return;
+    const dispatchIds = (stored.task.dispatchIds ?? ids).filter((id) => ids.includes(id));
+    setTask({
+      ...stored.task,
+      deviceIds: ids,
+      dispatchIds: dispatchIds.length > 0 ? dispatchIds : ids,
+    });
+    setDeviceTaskNames(stored.names);
+    setJoinedAt(stored.joinedAt);
+    setOfflineAt(stored.offlineAt);
+    setDispatchAt(stored.dispatchAt ?? stored.elapsed);
+    setElapsed(
+      stored.elapsed + Math.max(0, Math.floor((Date.now() - stored.savedAt) / 1000)),
+    );
+  }, [feed.devices, pairedIds]);
 
   const visibleTabs = TABS.filter((item) => (item.key === "new" ? canOperate : true));
 
@@ -2018,6 +2207,7 @@ export default function TaskInfoPage({
   /** 每 5 秒落一次盘，刷新后按 savedAt 补回流逝的运行时长 */
   useEffect(() => {
     if (elapsed % 5 !== 0) return;
+    if (!USE_MOCK && !restoredRef.current) return;
     const payload: StoredTaskState = {
       v: TASK_STATE_VERSION,
       task,
@@ -2037,6 +2227,7 @@ export default function TaskInfoPage({
 
   /** 设备取消配对后任务同步摘掉该设备；一台不剩就是没有运行任务 */
   useEffect(() => {
+    if (!USE_MOCK && !restoredRef.current) return;
     setTask((prev) => {
       if (prev.deviceIds.length === 0) return prev;
       const ids = prev.deviceIds.filter((id) => pairedIds.has(id));
@@ -2106,7 +2297,7 @@ export default function TaskInfoPage({
       const end = offlineAt[id] ?? elapsed;
       recorded[id] = Math.max(0, end - (joinedAt[id] ?? 0));
     });
-    return buildSessions(task.deviceIds, deviceTaskNames, recorded, task.operator);
+    return buildSessions(task.deviceIds, deviceTaskNames, recorded, task.operator, !USE_MOCK);
   }, [task.deviceIds, deviceTaskNames, task.operator, joinedAt, offlineAt, elapsed]);
 
   const firstDevice = (task.dispatchIds ?? task.deviceIds)[0];
@@ -2188,6 +2379,11 @@ export default function TaskInfoPage({
     );
   }, [history, filterSite, filterBatch, filterDevice, filterQuery]);
 
+  const siteOptions = useMemo(
+    () => [...new Set([...SITES, ...history.map((h) => h.site).filter(Boolean)])],
+    [history],
+  );
+
   const updateEvent = (id: string, patch: Partial<ReviewEvent>) =>
     setEvents((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 
@@ -2222,7 +2418,7 @@ export default function TaskInfoPage({
     notify("复核已保存", "success");
   };
 
-  const handleCreate = (input: NewTaskInput) => {
+  const applyDispatch = (input: NewTaskInput, jobId?: string) => {
     const at = new Date();
     const names: Record<string, string> = {};
     input.deviceIds.forEach((id) => {
@@ -2246,7 +2442,7 @@ export default function TaskInfoPage({
       return next;
     });
     setOfflineAt((prev) => {
-      const next = { ...prev };
+      const next: Record<string, number> = { ...prev };
       input.deviceIds.forEach((id) => {
         delete next[id];
       });
@@ -2257,7 +2453,7 @@ export default function TaskInfoPage({
     setSelectedHistory(null);
     setTask((prev) => ({
       ...prev,
-      id: dispatchedTaskId(prev.id, at),
+      id: jobId ?? dispatchedTaskId(prev.id, at),
       site: input.site,
       hall: input.hall,
       scene: input.scene,
@@ -2278,6 +2474,69 @@ export default function TaskInfoPage({
       "success",
     );
     setTab("current");
+  };
+
+  const handleCreate = (input: NewTaskInput) => {
+    if (USE_MOCK) {
+      applyDispatch(input);
+      return;
+    }
+    void dispatchToServer(input);
+  };
+
+  const dispatchToServer = async (input: NewTaskInput) => {
+    if (submitting) return;
+    const picked = input.deviceIds.flatMap((id) => {
+      const summary = summaries.get(id);
+      return summary ? [summary] : [];
+    });
+    const noVersion = picked.filter((item) => item.status === null);
+    if (picked.length !== input.deviceIds.length || noVersion.length > 0) {
+      notify("勾选设备尚未上报状态，暂时无法下发", "error");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const job = await createJob({
+        farm_id: input.site,
+        house_id: input.hall,
+        scenario: input.scene === "蛋鸡" ? "layer" : "broiler",
+        batch_id: input.batch,
+        owner_name: input.leader,
+        location: {
+          farm_id: input.site,
+          farm_name: input.site,
+          house_id: input.hall,
+          house_name: input.hall,
+          geo: parseGeoInput(input.location),
+        },
+        // 附件尚未接上传接口，先只保留本地预览
+        attachment_ids: [],
+        status: "dispatched",
+        remark: input.note.length > 0 ? input.note : null,
+      });
+      const results = await Promise.allSettled(
+        picked.map((item) =>
+          dispatchStartJob(item.device_id, item.status?.state_version ?? 0),
+        ),
+      );
+      const failed = results.filter((result) => result.status === "rejected");
+      applyDispatch(input, job.job_id);
+      historyReq.reload();
+      if (failed.length > 0) {
+        notify(
+          `任务 ${job.job_id} 已创建，${failed.length}/${picked.length} 台设备指令下发失败`,
+          "error",
+        );
+      } else {
+        notify(`已下发任务 ${job.job_id}：${input.deviceIds.join("、")}`, "success");
+      }
+    } catch (error) {
+      notify(`下发失败：${errorText(error)}`, "error");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -2308,11 +2567,11 @@ export default function TaskInfoPage({
             <>
               <SectionHead>
                 <SectionTitle>当前任务</SectionTitle>
-                <SectionHint>当前没有已接入的运行设备</SectionHint>
+                <SectionHint>尚未下发任务</SectionHint>
               </SectionHead>
               <Card>
                 <EmptyNote>
-                  暂无运行设备 · 请先在「设备配对」接入设备，再到「新建任务」下发
+                  暂无运行任务 · 请到「新建任务」下发；设备状态见「设备信息」
                 </EmptyNote>
               </Card>
             </>
@@ -2400,6 +2659,8 @@ export default function TaskInfoPage({
                 </CardBody>
               </Card>
 
+              {USE_MOCK ? (
+                <>
               <TwoCol>
                 <Card>
                   <CardHead>
@@ -2557,6 +2818,14 @@ export default function TaskInfoPage({
                   </StageChart>
                 </CardBody>
               </Card>
+                </>
+              ) : (
+                <Card>
+                  <CardBody>
+                    <EmptyNote>暂无评分结果 · 待会话评估数据接入后展示</EmptyNote>
+                  </CardBody>
+                </Card>
+              )}
             </>
           )}
 
@@ -2571,6 +2840,7 @@ export default function TaskInfoPage({
                 devices={devices}
                 runningIds={task.deviceIds}
                 onCreate={handleCreate}
+                submitting={submitting}
               />
             </>
           )}
@@ -2785,7 +3055,9 @@ export default function TaskInfoPage({
               <SectionHead>
                 <SectionTitle>事件复核</SectionTitle>
                 <SectionHint>
-                  待复核 {pendingCount} · 已复核 {reviewedCount} · 按任务名称拆分，覆盖当前与历史任务
+                  {USE_MOCK
+                    ? `待复核 ${pendingCount} · 已复核 ${reviewedCount} · 按任务名称拆分，覆盖当前与历史任务`
+                    : "事件上报接口接入后按任务展示；当前没有已上报事件"}
                 </SectionHint>
               </SectionHead>
               {eventGroups.length === 0 ? (
@@ -2957,7 +3229,7 @@ export default function TaskInfoPage({
                       onChange={(e) => setFilterSite(e.target.value)}
                     >
                       <option value="全部场区">全部场区</option>
-                      {SITES.map((s) => (
+                      {siteOptions.map((s) => (
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </FilterSelect>
@@ -2972,6 +3244,12 @@ export default function TaskInfoPage({
                       ))}
                     </FilterSelect>
                   </FilterBar>
+                  <AsyncState
+                    loading={!USE_MOCK && historyReq.loading}
+                    error={USE_MOCK ? null : historyReq.error}
+                    onRetry={USE_MOCK ? undefined : () => historyReq.reload()}
+                    loadingText="正在读取任务列表"
+                  >
                   <TableWrap>
                     <Table>
                       <thead>
@@ -3017,6 +3295,7 @@ export default function TaskInfoPage({
                       </tbody>
                     </Table>
                   </TableWrap>
+                  </AsyncState>
                 </CardBody>
               </Card>
             </>

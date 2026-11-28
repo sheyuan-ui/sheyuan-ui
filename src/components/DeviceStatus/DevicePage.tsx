@@ -3,6 +3,10 @@ import type { ReactNode } from "react";
 import { styled } from "@mui/material/styles";
 import { HUD } from "../../theme/theme";
 import { useNotification } from "../../contexts/NotificationContext";
+import AsyncState from "../AsyncState/AsyncState";
+import { API_BASE, USE_MOCK } from "../../api/client";
+import { useDevicesFeed, type DeviceSummary } from "../../api/useDevices";
+import type { DeviceStateReason, DeviceTaskState } from "../../contracts/types";
 
 type Phase = "running" | "online" | "offline" | "fault";
 type Tone = "ok" | "gold" | "cyan" | "danger" | "dim";
@@ -74,6 +78,10 @@ interface ManagedDevice {
   /** 最近三次任务记录，新的在前 */
   sessions: TaskRecord[];
   fault?: string;
+  /** 以下字段来自服务端快照，仅真实数据源提供；演示设备由 HARDWARE 表兜底 */
+  hubReachable?: boolean | null;
+  cloudReachable?: boolean | null;
+  storageFreeBytes?: number | null;
 }
 
 const INITIAL_DEVICES: ManagedDevice[] = [
@@ -268,6 +276,27 @@ const EMPTY_READING: HardwareReading = {
   writeFails: "--",
 };
 
+const reachText = (value: boolean | null | undefined): string =>
+  value === null || value === undefined ? "--" : value ? "可达" : "不可达";
+
+const formatFreeBytes = (bytes: number | null | undefined): string => {
+  if (bytes === null || bytes === undefined) return "--";
+  const gb = bytes / 1024 ** 3;
+  return `${gb >= 100 ? gb.toFixed(0) : gb.toFixed(1)} GB`;
+};
+
+/** 演示设备读预置表，真实设备只展示接口确实提供的项，其余保持 -- */
+const readingFor = (device: ManagedDevice): HardwareReading => {
+  const preset = HARDWARE[device.id];
+  if (preset) return preset;
+  return {
+    ...EMPTY_READING,
+    mgmt: reachText(device.hubReachable),
+    inet: reachText(device.cloudReachable),
+    free: formatFreeBytes(device.storageFreeBytes),
+  };
+};
+
 interface SignalItem {
   label: string;
   value: string;
@@ -289,7 +318,7 @@ const badValue = (value: string, bad: string, tone: Tone): Tone | undefined =>
 
 /** 单台设备的信号清单：类别按固定顺序排列 */
 const signalGroupsFor = (device: ManagedDevice): SignalGroup[] => {
-  const h = HARDWARE[device.id] ?? EMPTY_READING;
+  const h = readingFor(device);
   const temp = readingNum(h.temp);
   const freePct = h.free.includes("·") ? readingNum(h.free.split("·")[1]) : null;
   const writeFails = readingNum(h.writeFails);
@@ -384,6 +413,80 @@ const wifiText = (rssi: number | null) => {
 
 const heartbeatText = (d: ManagedDevice) =>
   d.heartbeatAt ? `${d.heartbeatAgo} · ${d.heartbeatAt}` : d.heartbeatAgo;
+
+const TASK_STATE_LABEL: Record<DeviceTaskState, string> = {
+  idle: "空闲",
+  starting: "启动中",
+  recording: "录制中",
+  paused: "已暂停",
+  stopping: "停止中",
+  error: "异常停机",
+};
+
+const FAULT_TEXT: Partial<Record<DeviceStateReason, string>> = {
+  device_error: "设备上报异常",
+  hub_unreachable: "管理服务不可达",
+};
+
+const formatClock = (iso: string | null): string => {
+  if (iso === null) return "--";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "--" : clock(d);
+};
+
+const formatAgo = (iso: string | null): string => {
+  if (iso === null) return "--";
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 2000) return "刚刚";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec} 秒前`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分 ${sec % 60} 秒前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour} 小时 ${min % 60} 分前`;
+  return `${Math.floor(hour / 24)} 天前`;
+};
+
+/** 服务端 DeviceSummary → 页面视图模型；未接的字段保持空值，不拿演示数据顶替。 */
+const fromSummary = (summary: DeviceSummary): ManagedDevice => {
+  const { status, runtime } = summary;
+  const stale = runtime.state === "offline" || runtime.state === "fault";
+  return {
+    id: summary.device_id,
+    alias: summary.alias ?? "未设置位置",
+    paired: summary.pair_status === "paired",
+    phase: runtime.state,
+    battery: status?.battery_pct ?? null,
+    rssi: status?.wifi.rssi_dbm ?? null,
+    heartbeatAgo: formatAgo(runtime.last_seen),
+    heartbeatAt:
+      runtime.state === "offline"
+        ? formatClock(runtime.offline_since ?? runtime.last_seen)
+        : "",
+    task:
+      runtime.state === "offline"
+        ? "已离线"
+        : runtime.state === "fault"
+          ? "故障停机"
+          : status === null
+            ? "空闲"
+            : TASK_STATE_LABEL[status.task_state],
+    score: null,
+    reviewPending: 0,
+    videoAt: stale ? formatClock(status?.last_seen ?? runtime.last_seen) : "--",
+    pendingFiles: 0,
+    pendingSize: "0",
+    recentEvents: [],
+    sessions: [],
+    fault:
+      runtime.state === "fault"
+        ? (FAULT_TEXT[runtime.reason] ?? "设备异常")
+        : undefined,
+    hubReachable: status?.hub_reachable ?? null,
+    cloudReachable: status?.cloud_reachable ?? null,
+    storageFreeBytes: status?.storage_free_bytes ?? null,
+  };
+};
 
 /* ---------- 页面骨架 ---------- */
 
@@ -630,6 +733,28 @@ const StatusChip = styled("span")<{ $tone: Tone }>(({ $tone }) => {
     },
   };
 });
+
+/** 卡片右上角：运行状态与配对状态各一枚，与顶栏、配对页口径一致 */
+const CardStatus = styled("div")({
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-end",
+  gap: 4,
+  flexShrink: 0,
+});
+
+const PairChip = styled("span")<{ $paired: boolean }>(({ $paired }) => ({
+  display: "inline-flex",
+  alignItems: "center",
+  height: 17,
+  padding: "0 6px",
+  borderRadius: 5,
+  border: `1px solid ${($paired ? HUD.ok : HUD.gold)}40`,
+  color: $paired ? HUD.ok : HUD.gold,
+  fontSize: 9.5,
+  letterSpacing: 0.3,
+  whiteSpace: "nowrap",
+}));
 
 const CardMeta = styled("div")({
   display: "flex",
@@ -1206,11 +1331,25 @@ const SessionEmpty = styled("span")({
 
 export default function DevicePage() {
   const { notify } = useNotification();
-  const [devices, setDevices] = useState<ManagedDevice[]>(INITIAL_DEVICES);
+  const feed = useDevicesFeed(!USE_MOCK);
+  /** 演示模式的本地状态；真实模式由接口驱动 */
+  const [mockDevices, setMockDevices] = useState<ManagedDevice[]>(INITIAL_DEVICES);
+  const [mockSyncedAt, setMockSyncedAt] = useState(() => clock());
+  const liveDevices = useMemo(
+    () => (feed.devices ?? []).map(fromSummary),
+    [feed.devices],
+  );
+  const devices = USE_MOCK ? mockDevices : liveDevices;
+  const syncedAt = USE_MOCK
+    ? mockSyncedAt
+    : feed.syncedAt === null
+      ? "--"
+      : clock(feed.syncedAt);
+  const serviceHost = API_BASE.length > 0 ? API_BASE : window.location.origin;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [channel, setChannel] = useState<Channel>("left");
   const [refreshing, setRefreshing] = useState(false);
-  const [syncedAt, setSyncedAt] = useState(() => clock());
+  const busy = USE_MOCK ? refreshing : feed.refreshing;
   /** 单路详情信号类别的展开状态；默认全部收起 */
   const [openSignals, setOpenSignals] = useState<Record<string, boolean>>({});
   const refreshTimer = useRef<number | null>(null);
@@ -1241,11 +1380,15 @@ export default function DevicePage() {
   const selected = devices.find((d) => d.id === selectedId) ?? null;
 
   const handleRefresh = () => {
-    if (refreshing) return;
+    if (busy) return;
+    if (!USE_MOCK) {
+      void feed.reload();
+      return;
+    }
     setRefreshing(true);
     refreshTimer.current = window.setTimeout(() => {
-      setSyncedAt(clock());
-      setDevices((prev) =>
+      setMockSyncedAt(clock());
+      setMockDevices((prev) =>
         prev.map((d) =>
           d.phase === "running" || d.phase === "online"
             ? { ...d, heartbeatAgo: "刚刚", videoAt: "刚刚" }
@@ -1526,13 +1669,12 @@ export default function DevicePage() {
           <div>
             <h1>设备总览</h1>
             <p>
-              当前现场管理入口 <b>http://192.168.31.20:8080</b> · iPad 现场管理服务 ·
-              局域网已连接 · 最近同步 {syncedAt}
+              现场管理服务 <b>{serviceHost}</b> · 最近同步 {syncedAt}
             </p>
           </div>
           <Actions>
-            <ActionBtn type="button" onClick={handleRefresh} disabled={refreshing}>
-              {refreshing ? "刷新中…" : "刷新设备"}
+            <ActionBtn type="button" onClick={handleRefresh} disabled={busy}>
+              {busy ? "刷新中…" : "刷新设备"}
             </ActionBtn>
           </Actions>
         </PageHead>
@@ -1551,12 +1693,20 @@ export default function DevicePage() {
             <b>{counts.fault}</b> 故障
           </CountChip>
           <SummaryHint>
-            V1 试验规模 4 台 · 仅运行中设备可点进单台详情
+            当前 {devices.length} 台 · 仅运行中设备可点进单台详情
           </SummaryHint>
         </SummaryRow>
 
-        <Grid>
-          {devices.map((d) => {
+        <AsyncState
+          loading={!USE_MOCK && feed.loading}
+          error={USE_MOCK ? null : feed.error}
+          onRetry={USE_MOCK ? undefined : () => void feed.reload()}
+          empty={!USE_MOCK && feed.devices !== null && devices.length === 0}
+          emptyText="暂无设备 · 等待设备注册"
+          loadingText="正在读取设备列表"
+        >
+          <Grid>
+            {devices.map((d) => {
             const meta = PHASE_META[d.phase];
             const enterable = d.phase === "running";
             const wifi = d.rssi === null ? "--" : `${d.rssi} dBm`;
@@ -1622,7 +1772,12 @@ export default function DevicePage() {
                             : "无位置"}
                       </span>
                     </DevName>
-                    <StatusChipView phase={d.phase} />
+                    <CardStatus>
+                      <StatusChipView phase={d.phase} />
+                      <PairChip $paired={d.paired}>
+                        {d.paired ? "已配对" : "未配对"}
+                      </PairChip>
+                    </CardStatus>
                   </CardHead>
 
                   <CardMeta>
@@ -1668,7 +1823,8 @@ export default function DevicePage() {
               </DeviceCard>
             );
           })}
-        </Grid>
+          </Grid>
+        </AsyncState>
       </Shell>
     </Page>
   );

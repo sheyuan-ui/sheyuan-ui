@@ -4,6 +4,12 @@ import { HUD } from "../../theme/theme";
 import { useNotification } from "../../contexts/NotificationContext";
 import type { DeviceOption } from "../TaskInfo/NewTaskForm";
 import type { DeviceCodeEntry } from "../../deviceCodes";
+import AsyncState from "../AsyncState/AsyncState";
+import { USE_MOCK } from "../../api/client";
+import { isApiRequestError } from "../../api/errors";
+import { fetchDeviceCodes, useDevicesFeed } from "../../api/useDevices";
+import { useRequest } from "../../api/useRequest";
+import { registerDeviceCode, removeDeviceCode } from "../../api/deviceCodes";
 
 const MONO = '"Roboto Mono", "Consolas", monospace';
 
@@ -39,6 +45,13 @@ const INITIAL_AUDIT: AuditEntry[] = [
 ];
 
 const ROLE_OPTIONS: AccountRole[] = ["admin", "operator", "viewer"];
+
+/** 待移除的设备码：mock 用设备号主键，真实模式以设备码为主键 */
+interface PendingCode {
+  id: string;
+  code: string;
+  remote: boolean;
+}
 
 const nowStamp = () => {
   const d = new Date();
@@ -297,8 +310,10 @@ export default function SettingsTab({
   const [newRole, setNewRole] = useState<AccountRole>("operator");
   const [pendingDelete, setPendingDelete] = useState<Account | null>(null);
   const [newCode, setNewCode] = useState("");
+  const [newCodeDevice, setNewCodeDevice] = useState("");
   const [codeError, setCodeError] = useState("");
-  const [pendingCode, setPendingCode] = useState<DeviceCodeEntry | null>(null);
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [pendingCode, setPendingCode] = useState<PendingCode | null>(null);
   const [roleFilter, setRoleFilter] = useState("全部角色");
   const [actionFilter, setActionFilter] = useState("全部动作");
 
@@ -312,6 +327,12 @@ export default function SettingsTab({
       (roleFilter === "全部角色" || a.role === roleFilter) &&
       (actionFilter === "全部动作" || a.action === actionFilter),
   );
+
+  /** 真实模式：设备码库来自管理服务，登记与移除直接写服务端 */
+  const feed = useDevicesFeed(!USE_MOCK);
+  const codesRequest = useRequest(fetchDeviceCodes, { enabled: !USE_MOCK });
+  const remoteCodes = codesRequest.data;
+  const reloadRemoteCodes = codesRequest.reload;
 
   const toggleSelected = () => {
     if (!selected) return;
@@ -376,11 +397,31 @@ export default function SettingsTab({
     return () => window.removeEventListener("keydown", onKey);
   }, [pendingDelete, pendingCode]);
 
-  /** 登记设备码：校验格式后交给全局设备码库，配对页据此放行 */
-  const submitCode = () => {
+  /** 登记设备码：校验格式后写入设备码库，配对页扫到该码才放行 */
+  const submitCode = async () => {
     const value = newCode.trim().toUpperCase();
     if (!/^[A-Z0-9][A-Z0-9-]{5,}$/.test(value)) {
       setCodeError("设备码至少 6 位，仅限字母、数字与连字符");
+      return;
+    }
+    if (!USE_MOCK) {
+      setCodeBusy(true);
+      try {
+        const created = await registerDeviceCode(value, newCodeDevice || null);
+        setNewCode("");
+        setNewCodeDevice("");
+        setCodeError("");
+        notify(
+          `已登记 ${created.code}${created.device_id ? `（${created.device_id}）` : ""}`,
+          "success",
+        );
+        reloadRemoteCodes();
+        void feed.reload();
+      } catch (error) {
+        setCodeError(isApiRequestError(error) ? error.message : "登记失败，请稍后重试");
+      } finally {
+        setCodeBusy(false);
+      }
       return;
     }
     const result = onAddCode(value);
@@ -405,9 +446,25 @@ export default function SettingsTab({
     notify(`已登记 ${result.id}（${value}），配对时将按此设备码校验`, "success");
   };
 
-  const confirmRemoveCode = () => {
+  const confirmRemoveCode = async () => {
     if (!pendingCode) return;
-    onRemoveCode(pendingCode.id);
+    const target = pendingCode;
+    setPendingCode(null);
+    if (target.remote) {
+      try {
+        await removeDeviceCode(target.code);
+        notify(`已移除设备码 ${target.code}，绑定设备已断开配对`, "info");
+        reloadRemoteCodes();
+        void feed.reload();
+      } catch (error) {
+        notify(
+          isApiRequestError(error) ? `移除失败：${error.message}` : "移除失败，请稍后重试",
+          "error",
+        );
+      }
+      return;
+    }
+    onRemoveCode(target.id);
     setAudit((prev) =>
       [
         {
@@ -415,13 +472,12 @@ export default function SettingsTab({
           action: "device.code.remove",
           actor: "admin",
           role: "admin",
-          target: `${pendingCode.id} · ${pendingCode.code}`,
+          target: `${target.id} · ${target.code}`,
         },
         ...prev,
       ].slice(0, 5),
     );
-    notify(`已移除 ${pendingCode.id} 的设备码，配对校验将不再通过`, "info");
-    setPendingCode(null);
+    notify(`已移除 ${target.id} 的设备码，配对校验将不再通过`, "info");
   };
 
   const createAccount = () => {
@@ -550,7 +606,11 @@ export default function SettingsTab({
       <Panel style={{ marginTop: 12 }}>
         <PanelHead>
           设备码库
-          <HeadHint>配对时按库内设备码校验，未登记不建立连接</HeadHint>
+          <HeadHint>
+            {USE_MOCK
+              ? "配对时按库内设备码校验，未登记不建立连接"
+              : "登记后扫到该码即可配对 · 移除会断开已绑定设备"}
+          </HeadHint>
         </PanelHead>
         <Body>
           <AddForm>
@@ -570,54 +630,134 @@ export default function SettingsTab({
                 setCodeError("");
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") submitCode();
+                if (e.key === "Enter") void submitCode();
               }}
             />
-            <Btn type="button" $primary onClick={submitCode}>
-              登记设备码
+            {!USE_MOCK && (
+              <SmallSelect
+                value={newCodeDevice}
+                aria-label="绑定设备"
+                onChange={(e) => setNewCodeDevice(e.target.value)}
+              >
+                <option value="">不绑定（扫码时绑定）</option>
+                {(feed.devices ?? []).map((item) => (
+                  <option key={item.device_id} value={item.device_id}>
+                    {item.alias ?? item.device_id}
+                  </option>
+                ))}
+              </SmallSelect>
+            )}
+            <Btn type="button" $primary onClick={() => void submitCode()} disabled={codeBusy}>
+              {codeBusy ? "登记中…" : "登记设备码"}
             </Btn>
             {codeError && <CodeError>{codeError}</CodeError>}
           </AddForm>
-          <TableWrap>
-            <Table>
-              <thead>
-                <tr>
-                  <th>设备号</th>
-                  <th>设备码</th>
-                  <th>接入</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {codes.map((entry) => {
-                  const linked = Boolean(devices.find((d) => d.id === entry.id)?.paired);
-                  return (
-                    <tr key={entry.id}>
-                      <td>{entry.id}</td>
-                      <td className="mono">{entry.code}</td>
-                      <td>
-                        <StatusTag $on={linked}>{linked ? "已连接" : "待接入"}</StatusTag>
-                      </td>
-                      <td>
-                        <Btn
-                          type="button"
-                          $danger
-                          style={{ height: 22, padding: "0 8px", fontSize: 10.5 }}
-                          onClick={() => setPendingCode(entry)}
-                        >
-                          移除
-                        </Btn>
-                      </td>
+
+          {USE_MOCK ? (
+            <>
+              <TableWrap>
+                <Table>
+                  <thead>
+                    <tr>
+                      <th>设备号</th>
+                      <th>设备码</th>
+                      <th>配对</th>
+                      <th>操作</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </Table>
-          </TableWrap>
-          {codes.length === 0 && <EmptyRow>设备码库为空，设备配对将无法通过校验</EmptyRow>}
-          <HintText>
-            设备码由设备上电后随热点返回；登记后分配新设备号并出现在「设备配对」。移除会断开该设备已建立的连接。
-          </HintText>
+                  </thead>
+                  <tbody>
+                    {codes.map((entry) => {
+                      const linked = Boolean(devices.find((d) => d.id === entry.id)?.paired);
+                      return (
+                        <tr key={entry.id}>
+                          <td>{entry.id}</td>
+                          <td className="mono">{entry.code}</td>
+                          <td>
+                            <StatusTag $on={linked}>{linked ? "已配对" : "未配对"}</StatusTag>
+                          </td>
+                          <td>
+                            <Btn
+                              type="button"
+                              $danger
+                              style={{ height: 22, padding: "0 8px", fontSize: 10.5 }}
+                              onClick={() =>
+                                setPendingCode({ id: entry.id, code: entry.code, remote: false })
+                              }
+                            >
+                              移除
+                            </Btn>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </Table>
+              </TableWrap>
+              {codes.length === 0 && <EmptyRow>设备码库为空，设备配对将无法通过校验</EmptyRow>}
+              <HintText>
+                设备码由设备上电后随热点返回；登记后分配新设备号并出现在「设备配对」。移除会断开该设备的配对。
+              </HintText>
+            </>
+          ) : (
+            <>
+              <AsyncState
+                loading={codesRequest.loading}
+                error={codesRequest.error}
+                onRetry={codesRequest.reload}
+                empty={(remoteCodes ?? []).length === 0}
+                emptyText="设备码库为空，设备配对将无法通过校验"
+                loadingText="正在读取设备码库"
+              >
+                <TableWrap>
+                  <Table>
+                    <thead>
+                      <tr>
+                        <th>设备号</th>
+                        <th>设备码</th>
+                        <th>配对</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(remoteCodes ?? []).map((entry) => {
+                        const linked = entry.pair_status === "paired";
+                        return (
+                          <tr key={entry.code}>
+                            <td>
+                              {entry.device_id ?? <span className="dim">—</span>}
+                            </td>
+                            <td className="mono">{entry.code}</td>
+                            <td>
+                              <StatusTag $on={linked}>{linked ? "已配对" : "未配对"}</StatusTag>
+                            </td>
+                            <td>
+                              <Btn
+                                type="button"
+                                $danger
+                                style={{ height: 22, padding: "0 8px", fontSize: 10.5 }}
+                                onClick={() =>
+                                  setPendingCode({
+                                    id: entry.device_id ?? "未绑定",
+                                    code: entry.code,
+                                    remote: true,
+                                  })
+                                }
+                              >
+                                移除
+                              </Btn>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </Table>
+                </TableWrap>
+              </AsyncState>
+              <HintText>
+                设备码是设备身份证，一台设备一个码；登记进库后，设备配对页扫到该码才会配对。移除设备码会断开其已绑定的设备。
+              </HintText>
+            </>
+          )}
         </Body>
       </Panel>
 

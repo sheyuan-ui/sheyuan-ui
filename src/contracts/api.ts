@@ -13,7 +13,8 @@ export const API = {
   deviceRegister: "/api/devices/register",
   /** 设备侧：心跳上报 */
   deviceHeartbeat: (id: string) => `/api/devices/${id}/heartbeat`,
-  pairCode: "/api/devices/pair-code",
+  deviceCodes: "/api/device-codes",
+  deviceCode: (code: string) => `/api/device-codes/${encodeURIComponent(code)}`,
   pair: "/api/devices/pair",
   previewOffer: (deviceId: string) => `/api/devices/${deviceId}/preview/offer`,
 

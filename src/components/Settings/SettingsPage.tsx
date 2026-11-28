@@ -62,7 +62,7 @@ export default function SettingsPage({
         <PageHead>
           <div>
             <h1>设置</h1>
-            <p>仅管理员可访问 · 设备码、账号管理与审计流水</p>
+            <p>仅管理员可访问 · 设备、账号与审计流水</p>
           </div>
         </PageHead>
         <SettingsTab

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { styled } from "@mui/material/styles";
 import { HUD } from "../../theme/theme";
+import type { DeviceRuntimeState } from "../../contracts/types";
 import AttachmentDialog, { type Attachment } from "./AttachmentPreview";
 
 export interface DeviceOption {
@@ -8,6 +9,8 @@ export interface DeviceOption {
   alias?: string;
   online: boolean;
   paired: boolean;
+  /** 服务端运行状态；演示数据缺省时按 online 视为在线/离线 */
+  state?: DeviceRuntimeState;
 }
 
 export interface NewTaskInput {
@@ -29,6 +32,8 @@ interface NewTaskFormProps {
   /** 当前任务正在使用的设备 */
   runningIds?: string[];
   onCreate: (input: NewTaskInput) => void;
+  /** 正在提交服务端，禁用下发避免重复建任务 */
+  submitting?: boolean;
 }
 
 const SITES = ["1号场区", "2号场区", "3号场区"];
@@ -51,8 +56,10 @@ const todayValue = (d = new Date()) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
+const selectable = (d: DeviceOption) => d.online && d.paired && d.state !== "fault";
+
 const defaultSelection = (devices: DeviceOption[]) =>
-  devices.filter((d) => d.online && d.paired).map((d) => d.id);
+  devices.filter(selectable).map((d) => d.id);
 
 const Card = styled("section")(({ theme }) => ({
   display: "flex",
@@ -353,6 +360,7 @@ export default function NewTaskForm({
   devices,
   runningIds = [],
   onCreate,
+  submitting = false,
 }: NewTaskFormProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -546,24 +554,33 @@ export default function NewTaskForm({
 
             {pickerOpen && pairedDevices.length > 0 && (
               <PickerPanel role="listbox" aria-multiselectable="true">
-                {pairedDevices.map((d) => (
-                  <PickerRow key={d.id} $off={!d.online}>
-                    <input
-                      type="checkbox"
-                      checked={deviceIds.includes(d.id)}
-                      disabled={!d.online}
-                      onChange={() => d.online && toggleDevice(d.id)}
-                    />
-                    <Dot $on={d.online} />
-                    <RowName>
-                      <span>{d.id}</span>
-                      {d.alias && <i>{d.alias}</i>}
-                    </RowName>
-                    <RowState $on={d.online}>
-                      {!d.online ? "离线" : runningIds.includes(d.id) ? "运行中" : "在线"}
-                    </RowState>
-                  </PickerRow>
-                ))}
+                {pairedDevices.map((d) => {
+                  const unavailable = !d.online || d.state === "fault";
+                  return (
+                    <PickerRow key={d.id} $off={unavailable}>
+                      <input
+                        type="checkbox"
+                        checked={deviceIds.includes(d.id)}
+                        disabled={unavailable}
+                        onChange={() => !unavailable && toggleDevice(d.id)}
+                      />
+                      <Dot $on={!unavailable} />
+                      <RowName>
+                        <span>{d.id}</span>
+                        {d.alias && <i>{d.alias}</i>}
+                      </RowName>
+                      <RowState $on={!unavailable}>
+                        {!d.online
+                          ? "离线"
+                          : d.state === "fault"
+                            ? "故障"
+                            : runningIds.includes(d.id)
+                              ? "运行中"
+                              : "在线"}
+                      </RowState>
+                    </PickerRow>
+                  );
+                })}
               </PickerPanel>
             )}
           </PickerWrap>
@@ -574,7 +591,7 @@ export default function NewTaskForm({
                 : "暂无已配对设备，请先在顶栏「设备配对」中接入"}
             </Warn>
           ) : (
-            <Hint>仅已配对且在线的设备可参与任务；离线设备恢复在线后可再选。</Hint>
+            <Hint>仅已配对、在线且无故障的设备可参与任务；离线或故障恢复后可再选。</Hint>
           )}
           {continued.length > 0 && (
             <Hint>
@@ -660,9 +677,9 @@ export default function NewTaskForm({
       </Body>
 
       <Footer>
-        <Action type="button" onClick={reset}>重置</Action>
-        <Action type="button" $primary disabled={!canSubmit} onClick={submit}>
-          确认并下发
+        <Action type="button" onClick={reset} disabled={submitting}>重置</Action>
+        <Action type="button" $primary disabled={!canSubmit || submitting} onClick={submit}>
+          {submitting ? "下发中…" : "确认并下发"}
         </Action>
       </Footer>
 
