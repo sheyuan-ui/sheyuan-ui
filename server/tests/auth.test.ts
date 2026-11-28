@@ -190,15 +190,15 @@ describe("三角色中间件", () => {
     assert.equal(read.status, 200);
 
     const write = await postJson(
-      "/api/devices/pair-code",
-      { device_id: "edge-auth-viewer" },
+      "/api/device-codes",
+      { code: "SY-HVIEW-0D7BED" },
       { token: viewer.access_token, idempotencyKey: "viewer-write-1" },
     );
     assert.equal(write.status, 403);
     assert.equal(write.body.code, "FORBIDDEN");
 
     const forbidden = auditsOf("auth.forbidden").find(
-      (entry) => entry.target_id === "POST /api/devices/pair-code",
+      (entry) => entry.target_id === "POST /api/device-codes",
     );
     assert.ok(forbidden);
     assert.equal(forbidden.actor_id, viewer.user.user_id);
@@ -208,17 +208,23 @@ describe("三角色中间件", () => {
   test("operator 可写，业务审计继承验签身份", async () => {
     const operator = await login("op-a");
 
-    const issued = await postJson(
-      "/api/devices/pair-code",
-      { device_id: "edge-auth-op" },
-      { token: operator.access_token, idempotencyKey: "op-pair-code-1" },
+    const registered = await postJson("/api/devices/register", {
+      device_id: "edge-auth-op",
+      model: "SY-Helmet Edge",
+      firmware_version: "v1.4.2",
+    });
+    assert.ok(registered.status === 200 || registered.status === 201);
+
+    const created = await postJson(
+      "/api/device-codes",
+      { code: "SY-HAUTH-0D7BED", device_id: "edge-auth-op" },
+      { token: operator.access_token, idempotencyKey: "op-device-code-1" },
     );
-    assert.equal(issued.status, 201);
-    const code = (issued.body.data as { code: string }).code;
+    assert.equal(created.status, 201);
 
     const paired = await postJson(
       "/api/devices/pair",
-      { code, ip_address: "192.168.1.20" },
+      { device_code: "SY-HAUTH-0D7BED", device_id: "edge-auth-op", ip_address: "192.168.1.20" },
       { token: operator.access_token, idempotencyKey: "op-pair-1" },
     );
     assert.equal(paired.status, 200);

@@ -3,6 +3,7 @@ import { styled } from "@mui/material/styles";
 import { useState } from "react";
 import { HUD } from "../../theme/theme";
 import type { Role } from "../../api";
+import type { DeviceRuntimeState } from "../../contracts/types";
 import { ChevronDownIcon } from "../icons";
 
 const AppBarContainer = styled("div")(({ theme }) => ({
@@ -127,14 +128,28 @@ const StatusDot = styled("div")<{ status: "connected" | "disconnected" | "error"
         : "none",
 }));
 
-const DeviceDot = styled("i")({
+const DeviceDot = styled("i")<{ $tone: string }>(({ $tone }) => ({
   width: 5,
   height: 5,
   borderRadius: "50%",
-  backgroundColor: HUD.ok,
-  boxShadow: "0 0 4px rgba(95, 208, 138, 0.5)",
+  backgroundColor: $tone,
+  boxShadow: $tone === HUD.textDim ? "none" : `0 0 4px ${$tone}80`,
   flexShrink: 0,
-});
+}));
+
+/** 菜单行的状态标签：配对状态与运行状态各一枚 */
+const MenuState = styled("span")<{ $tone: string }>(({ $tone }) => ({
+  flexShrink: 0,
+  padding: "0 6px",
+  borderRadius: 4,
+  border: `1px solid ${$tone}40`,
+  backgroundColor: `${$tone}0f`,
+  color: $tone,
+  fontSize: 9.5,
+  lineHeight: "16px",
+  letterSpacing: 0.3,
+  whiteSpace: "nowrap",
+}));
 
 const DeviceAlias = styled("span")({
   minWidth: 0,
@@ -198,14 +213,32 @@ interface AppBarDevice {
   alias?: string;
   online: boolean;
   paired: boolean;
+  state?: DeviceRuntimeState;
 }
+
+const STATE_LABEL: Record<DeviceRuntimeState, string> = {
+  running: "运行中",
+  online: "在线",
+  offline: "离线",
+  fault: "故障",
+};
+
+const STATE_TONE: Record<DeviceRuntimeState, string> = {
+  running: HUD.ok,
+  online: HUD.cyan,
+  offline: HUD.textDim,
+  fault: HUD.danger,
+};
+
+const stateOf = (device: AppBarDevice): DeviceRuntimeState =>
+  device.state ?? (device.online ? "online" : "offline");
 
 interface AppBarProps {
   role: Role;
   onLogout: () => void;
   page: Page;
   onNavigate: (page: Page) => void;
-  /** 在线且已配对的设备 */
+  /** 全部设备：顶栏同时展示配对状态与运行状态 */
   devices: AppBarDevice[];
   activeDeviceId: string | null;
   onSelectDevice: (id: string) => void;
@@ -221,6 +254,11 @@ export default function AppBar({
   onSelectDevice,
 }: AppBarProps) {
   const [deviceMenuEl, setDeviceMenuEl] = useState<null | HTMLElement>(null);
+  const pairedCount = devices.filter((d) => d.paired).length;
+  const usableCount = devices.filter((d) => {
+    const state = stateOf(d);
+    return d.paired && state !== "offline" && state !== "fault";
+  }).length;
 
   return (
     <AppBarContainer>
@@ -267,13 +305,15 @@ export default function AppBar({
             type="button"
             aria-haspopup="menu"
             aria-expanded={Boolean(deviceMenuEl)}
-            aria-label={`双目采集 ${devices.length > 0 ? "已连接" : "未连接"}，共 ${devices.length} 台设备`}
+            aria-label={`双目采集 已配对 ${pairedCount} 台，共 ${devices.length} 台设备`}
             onClick={(e) => setDeviceMenuEl(e.currentTarget)}
           >
-            <StatusDot status={devices.length > 0 ? "connected" : "disconnected"} />
+            <StatusDot status={usableCount > 0 ? "connected" : "disconnected"} />
             <span>
               <span className="prefix">双目采集 · </span>
-              {devices.length > 0 ? "已连接" : "未连接"}（{devices.length}）
+              {devices.length === 0
+                ? "未接入"
+                : `已配对（${pairedCount}/${devices.length}）`}
             </span>
             <ChevronDownIcon style={{ fontSize: 11, opacity: 0.55 }} />
           </DataSourceDisplay>
@@ -287,7 +327,7 @@ export default function AppBar({
               paper: {
                 sx: {
                   mt: "6px",
-                  width: 216,
+                  width: 268,
                   p: "4px",
                   borderRadius: "8px",
                   backgroundColor: "rgba(6, 13, 27, 0.97)",
@@ -310,28 +350,34 @@ export default function AppBar({
                   color: HUD.textDim,
                 }}
               >
-                暂无已连接设备
+                暂无设备 · 等待设备上报
               </MenuItem>
             ) : (
               devices.map((device) => {
                 const active = device.id === activeDeviceId;
+                const state = stateOf(device);
+                const selectable =
+                  device.paired && state !== "offline" && state !== "fault";
                 return (
                   <MenuItem
                     key={device.id}
+                    disabled={!selectable}
                     selected={active}
                     aria-current={active ? "true" : undefined}
                     onClick={() => {
+                      if (!selectable) return;
                       onSelectDevice(device.id);
                       setDeviceMenuEl(null);
                     }}
                     sx={{
-                      minWidth: 200,
+                      minWidth: 240,
                       minHeight: 34,
-                      gap: "8px",
+                      gap: "7px",
                       px: "8px",
                       borderRadius: "4px",
                       fontSize: 12.5,
                       color: HUD.text,
+                      "&.Mui-disabled": { opacity: 0.5 },
                       "&.Mui-selected": {
                         backgroundColor: "rgba(63, 178, 255, 0.10)",
                         boxShadow: `inset 2px 0 0 ${HUD.cyan}`,
@@ -339,9 +385,13 @@ export default function AppBar({
                       },
                     }}
                   >
-                    <DeviceDot />
+                    <DeviceDot $tone={STATE_TONE[state]} />
                     <span style={{ flexShrink: 0 }}>{device.id}</span>
                     {device.alias ? <DeviceAlias>{device.alias}</DeviceAlias> : null}
+                    <MenuState $tone={device.paired ? HUD.ok : HUD.textDim}>
+                      {device.paired ? "已配对" : "未配对"}
+                    </MenuState>
+                    <MenuState $tone={STATE_TONE[state]}>{STATE_LABEL[state]}</MenuState>
                     {active ? (
                       <CurrentCheck>
                         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>

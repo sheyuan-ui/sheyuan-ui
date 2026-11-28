@@ -6,6 +6,8 @@ export interface DeviceSummary {
   device_id: string;
   alias: string | null;
   pair_status: PairStatus;
+  /** 设备码库里绑定的唯一设备码；未登记为 null */
+  device_code: string | null;
   status: DeviceStatus | null;
   /** 四态派生（T07）：由心跳与设备快照实时计算，不入库 */
   runtime: DeviceRuntimeView;

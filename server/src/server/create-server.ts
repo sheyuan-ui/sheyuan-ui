@@ -19,7 +19,7 @@ import { HttpError, toErrorPayload } from "./http-errors.ts";
 import { recordAccessDenied } from "./middleware/audit.ts";
 import { enforcePolicy, isDeviceRoute, requiredPolicy } from "./middleware/roles.ts";
 import { Router, type RequestContext, type RouteResult } from "./router.ts";
-import { createOfflineSweeper, type OfflineSweeper } from "./sweeper.ts";
+import { createCommandSweeper, createOfflineSweeper, type CommandSweeper, type OfflineSweeper } from "./sweeper.ts";
 
 export interface HelmetServerOptions {
   db: Db;
@@ -38,12 +38,14 @@ export interface HelmetServerOptions {
   accessTokenTtlSeconds?: number;
   /** 刷新令牌有效期，默认 30 天 */
   refreshTokenTtlSeconds?: number;
-  /** 设备令牌：设置后 /api/devices/register 与心跳必须携带 X-Device-Token；未设置时默认读环境变量 */
+  /** 设备令牌：设置后设备注册、心跳与指令回执必须携带 X-Device-Token；未设置时默认读环境变量 */
   deviceToken?: string;
   /** 建议心跳间隔，默认 5 秒，随注册/心跳响应下发给设备 */
   heartbeatIntervalMs?: number;
   /** 超过该时长未心跳判离线，默认 15 秒 */
   offlineTimeoutMs?: number;
+  /** 指令超时判定轮询间隔，默认 1 秒 */
+  commandSweepIntervalMs?: number;
 }
 
 export interface HelmetServer {
@@ -51,6 +53,8 @@ export interface HelmetServer {
   hub: Hub;
   /** 心跳超时判定任务：listen 时启动，close 时停止；run() 可手动触发一次 */
   sweeper: OfflineSweeper;
+  /** 指令超时判定任务：listen 时启动，close 时停止；run() 可手动触发一次 */
+  commandSweeper: CommandSweeper;
   listen(port?: number, host?: string): Promise<AddressInfo>;
   close(): Promise<void>;
 }
@@ -131,14 +135,18 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
     offlineTimeoutMs: options.offlineTimeoutMs,
     logger: options.logger,
   });
+  const commandSweeper = createCommandSweeper(repos, hub, {
+    intervalMs: options.commandSweepIntervalMs,
+    logger: options.logger,
+  });
   let warnedDeviceToken = false;
 
-  /** 设备不是自然人账号：注册与心跳只校验设备令牌，不进入角色矩阵 */
+  /** 设备不是自然人账号：注册、心跳与指令回执只校验设备令牌，不进入角色矩阵 */
   function authorizeDevice(req: IncomingMessage): void {
     if (deviceToken === undefined) {
       if (options.requireAuth === true && !warnedDeviceToken) {
         warnedDeviceToken = true;
-        options.logger?.("未配置 HELMET_HUB_DEVICE_TOKEN：设备注册与心跳接口当前不鉴权");
+        options.logger?.("未配置 HELMET_HUB_DEVICE_TOKEN：设备注册、心跳与指令回执接口当前不鉴权");
       }
       return;
     }
@@ -263,6 +271,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
     server,
     hub,
     sweeper,
+    commandSweeper,
     listen(port = 8080, host = "0.0.0.0") {
       return new Promise<AddressInfo>((resolve, reject) => {
         const onError = (error: Error) => {
@@ -272,6 +281,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
         const onListening = () => {
           server.off("error", onError);
           sweeper.start();
+          commandSweeper.start();
           resolve(server.address() as AddressInfo);
         };
         server.once("error", onError);
@@ -281,6 +291,7 @@ export function createHelmetServer(options: HelmetServerOptions): HelmetServer {
     },
     async close() {
       sweeper.stop();
+      commandSweeper.stop();
       hub.close();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

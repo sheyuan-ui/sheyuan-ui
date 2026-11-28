@@ -1,5 +1,7 @@
-import { randomInt } from "node:crypto";
-import { API, WS_TOPICS } from "../../contracts/api.ts";
+import {
+  API,
+  WS_TOPICS,
+} from "../../contracts/api.ts";
 import type { DeviceStatus, DeviceTaskState, WifiStatus } from "../../contracts/types.ts";
 import { nowIso } from "../../db/time.ts";
 import { deriveDeviceState } from "../../device/state.ts";
@@ -14,12 +16,19 @@ import { asObject, bool, enumOf, int, isoStr, nullableStr, str } from "../valida
 
 function summaries(repos: Repositories, now: string = nowIso()): DeviceSummary[] {
   const statuses = new Map(repos.devices.listStatuses().map((status) => [status.device_id, status]));
+  const codes = new Map(
+    repos.devices
+      .listDeviceCodes()
+      .filter((item) => item.device_id !== null)
+      .map((item) => [item.device_id as string, item.code]),
+  );
   return repos.devices.listDevices().map((device) => {
     const status = statuses.get(device.device_id) ?? null;
     return {
       device_id: device.device_id,
       alias: device.alias,
       pair_status: device.pair_status,
+      device_code: codes.get(device.device_id) ?? null,
       status,
       runtime: deriveDeviceState({
         status,
@@ -56,14 +65,6 @@ function readWifi(input: Record<string, unknown>): WifiStatus {
     ssid: nullableStr(wifi, "ssid"),
     rssi_dbm: optionalNumber(wifi, "rssi_dbm"),
   };
-}
-
-function randomPairCode(repos: Repositories): string {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const code = String(randomInt(1000, 10_000));
-    if (!repos.devices.hasPairCode(code)) return code;
-  }
-  throw new HttpError("INTERNAL", "无法生成未占用的配对码");
 }
 
 export function registerDeviceRoutes(router: Router): void {
@@ -212,45 +213,30 @@ export function registerDeviceRoutes(router: Router): void {
     };
   });
 
-  router.add("POST", API.pairCode, async (ctx) => {
-    const body = await readJsonBody(ctx.req);
-    return withIdempotency(ctx, "devices.pair-code", requestFingerprint(body.raw), () => {
-      const input = asObject(body.value);
-      const deviceId = str(input, "device_id");
-      const provided = input.code === undefined ? undefined : str(input, "code");
-      const code = provided ?? randomPairCode(ctx.repos);
-      if (!/^\d{4}$/.test(code)) {
-        throw new HttpError("INVALID_ARGUMENT", "配对码必须为 4 位数字", { code: "4 digits" });
-      }
-      const ttl = input.ttl_ms === undefined
-        ? 120_000
-        : int(input, "ttl_ms", { min: 1_000, max: 600_000 });
-
-      return { status: 201, data: ctx.repos.devices.issuePairCode(deviceId, code, ttl) };
-    });
-  });
-
   router.add("POST", API.pair, async (ctx) => {
     const body = await readJsonBody(ctx.req);
     return withIdempotency(ctx, "devices.pair", requestFingerprint(body.raw), () => {
       const input = asObject(body.value);
-      const code = str(input, "code");
+      const deviceCode = str(input, "device_code");
+      const deviceId = input.device_id === undefined ? null : str(input, "device_id");
       const ipAddress = nullableStr(input, "ip_address");
-      const result = ctx.repos.devices.consumePairCode(code);
+      const result = ctx.repos.devices.pairByDeviceCode(deviceCode, deviceId, ipAddress);
 
       if (!result.ok) {
         if (result.reason === "not_found") {
-          throw new HttpError("INVALID_ARGUMENT", "配对码不存在", { reason: result.reason });
+          throw new HttpError("NOT_FOUND", "设备码不在库中", { reason: result.reason });
         }
-        if (result.reason === "expired") {
-          throw new HttpError("INVALID_ARGUMENT", "配对码已过期", { reason: result.reason });
+        if (result.reason === "unbound") {
+          throw new HttpError("INVALID_ARGUMENT", "设备码未绑定设备，无法配对", {
+            reason: result.reason,
+          });
         }
-        throw new HttpError("CONFLICT", "配对码已使用", { reason: result.reason });
+        if (result.reason === "device_not_found") {
+          throw new HttpError("NOT_FOUND", "设备尚未注册", { reason: result.reason });
+        }
+        throw new HttpError("CONFLICT", "设备码与设备不匹配", { reason: result.reason });
       }
 
-      if (ipAddress !== null) {
-        ctx.repos.devices.setPairStatus(result.device_id, "paired", ipAddress);
-      }
       ctx.repos.audit.append({
         actor_id: ctx.auth?.user_id ?? null,
         actor_role: ctx.auth?.role ?? null,
@@ -259,7 +245,14 @@ export function registerDeviceRoutes(router: Router): void {
         target_id: result.device_id,
       });
 
-      return { status: 200, data: { device_id: result.device_id, pair_status: "paired" } };
+      return {
+        status: 200,
+        data: {
+          device_id: result.device_id,
+          pair_status: "paired",
+          device_code: result.device_code,
+        },
+      };
     });
   });
 

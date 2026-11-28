@@ -1,7 +1,7 @@
 import type { DeviceStatus, DeviceTaskState } from "../contracts/types.ts";
 import type { Db } from "../db/open.ts";
-import { NotFoundError, ValidationError } from "../db/errors.ts";
-import { isoAfter, nowIso, toIso } from "../db/time.ts";
+import { ConflictError, NotFoundError, ValidationError } from "../db/errors.ts";
+import { nowIso, toIso } from "../db/time.ts";
 import { withTransaction } from "../db/transaction.ts";
 
 export type PairStatus = "unpaired" | "paired" | "revoked";
@@ -18,9 +18,26 @@ export interface DeviceRecord {
   updated_at: string;
 }
 
-export type PairCodeResult =
-  | { ok: true; device_id: string }
-  | { ok: false; reason: "not_found" | "expired" | "consumed" };
+export type PairByCodeResult = { ok: true; device_id: string; device_code: string }
+  | { ok: false; reason: "not_found" | "unbound" | "mismatch" | "device_not_found" };
+
+/** 设备码库条目：code 是设备唯一身份证，device_id 在配对时绑定 */
+export interface DeviceCodeRecord {
+  code: string;
+  device_id: string | null;
+  /** 绑定设备的配对状态；未绑定为 null */
+  pair_status: PairStatus | null;
+  created_at: string;
+  paired_at: string | null;
+}
+
+interface DeviceCodeRow {
+  code: string;
+  device_id: string | null;
+  pair_status: PairStatus | null;
+  created_at: string;
+  paired_at: string | null;
+}
 
 interface DeviceRow {
   device_id: string;
@@ -241,58 +258,123 @@ export class DeviceRepository {
     return rows.map(toStatus);
   }
 
-  hasPairCode(code: string): boolean {
-    return this.db.prepare("SELECT 1 AS ok FROM pairing_code WHERE code = ?").get(code) !== undefined;
+  /* ---------------- 设备码库 ---------------- */
+
+  listDeviceCodes(): DeviceCodeRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT c.code, c.device_id, d.pair_status, c.created_at, c.paired_at
+         FROM device_code c
+         LEFT JOIN device d ON d.device_id = c.device_id
+         ORDER BY c.created_at, c.code`,
+      )
+      .all() as unknown as DeviceCodeRow[];
+    return rows.map(toDeviceCode);
   }
 
-  /** 签发短期配对码；同一设备此前的码全部作废。 */
-  issuePairCode(deviceId: string, code: string, ttlMs = 120_000, issuedAt: string = nowIso()): {
-    code: string;
-    device_id: string;
-    issued_at: string;
-    expires_at: string;
-  } {
-    if (!code) throw new ValidationError("配对码不能为空");
-    if (ttlMs <= 0) throw new ValidationError("配对码有效期必须大于 0");
-    const issued = toIso(issuedAt);
-    const expires = isoAfter(issued, ttlMs);
-
-    this.register(deviceId);
-
-    withTransaction(this.db, () => {
-      this.db.prepare("DELETE FROM pairing_code WHERE device_id = ?").run(deviceId);
-      this.db
-        .prepare(
-          `INSERT INTO pairing_code (code, device_id, issued_at, expires_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(code, deviceId, issued, expires);
-    });
-
-    return { code, device_id: deviceId, issued_at: issued, expires_at: expires };
+  /** 登记设备码；只登记白名单，绑定设备在配对时完成。 */
+  registerDeviceCode(
+    code: string,
+    deviceId: string | null = null,
+    createdAt: string = nowIso(),
+  ): DeviceCodeRecord {
+    const normalized = normalizeDeviceCode(code);
+    const now = toIso(createdAt);
+    if (this.db.prepare("SELECT 1 AS ok FROM device_code WHERE code = ?").get(normalized)) {
+      throw new ConflictError(`设备码已在库中：${normalized}`);
+    }
+    if (deviceId !== null && this.getDevice(deviceId) === null) {
+      throw new NotFoundError("设备", deviceId);
+    }
+    this.db
+      .prepare("INSERT INTO device_code (code, device_id, created_at) VALUES (?, ?, ?)")
+      .run(normalized, deviceId, now);
+    const record = this.listDeviceCodes().find((item) => item.code === normalized);
+    if (!record) throw new NotFoundError("设备码", normalized);
+    return record;
   }
 
-  consumePairCode(code: string, consumedAt: string = nowIso()): PairCodeResult {
-    const now = toIso(consumedAt);
+  /** 移除设备码；已绑定的设备同步断开配对。 */
+  removeDeviceCode(code: string): { code: string; device_id: string | null } | null {
+    const normalized = normalizeDeviceCode(code);
     return withTransaction(this.db, () => {
       const row = this.db
-        .prepare("SELECT device_id, expires_at, consumed_at FROM pairing_code WHERE code = ?")
-        .get(code) as unknown as
-        | { device_id: string; expires_at: string; consumed_at: string | null }
+        .prepare("SELECT code, device_id FROM device_code WHERE code = ?")
+        .get(normalized) as unknown as
+        | { code: string; device_id: string | null }
         | undefined;
-
-      if (!row) return { ok: false, reason: "not_found" } as const;
-      if (row.consumed_at !== null) return { ok: false, reason: "consumed" } as const;
-      if (row.expires_at < now) return { ok: false, reason: "expired" } as const;
-
-      this.db
-        .prepare("UPDATE pairing_code SET consumed_at = ? WHERE code = ?")
-        .run(now, code);
-      this.db
-        .prepare("UPDATE device SET pair_status = 'paired', updated_at = ? WHERE device_id = ?")
-        .run(now, row.device_id);
-
-      return { ok: true, device_id: row.device_id } as const;
+      if (!row) return null;
+      this.db.prepare("DELETE FROM device_code WHERE code = ?").run(normalized);
+      if (row.device_id !== null) {
+        this.db
+          .prepare("UPDATE device SET pair_status = 'unpaired', updated_at = ? WHERE device_id = ?")
+          .run(nowIso(), row.device_id);
+      }
+      return { code: row.code, device_id: row.device_id };
     });
   }
+
+  /**
+   * 扫到设备码后按库配对：码必须在库中；未绑定设备时用扫码结果绑定。
+   * 设备码是持久身份，重复配对直接返回成功。
+   */
+  pairByDeviceCode(
+    code: string,
+    deviceId: string | null = null,
+    ipAddress: string | null = null,
+    pairedAt: string = nowIso(),
+  ): PairByCodeResult {
+    const normalized = normalizeDeviceCode(code);
+    const now = toIso(pairedAt);
+    return withTransaction(this.db, () => {
+      const row = this.db
+        .prepare("SELECT code, device_id FROM device_code WHERE code = ?")
+        .get(normalized) as unknown as
+        | { code: string; device_id: string | null }
+        | undefined;
+      if (!row) return { ok: false, reason: "not_found" } as const;
+
+      let target = row.device_id;
+      if (target === null) {
+        if (deviceId === null) return { ok: false, reason: "unbound" } as const;
+        if (this.getDevice(deviceId) === null) {
+          return { ok: false, reason: "device_not_found" } as const;
+        }
+        target = deviceId;
+      } else if (deviceId !== null && deviceId !== target) {
+        return { ok: false, reason: "mismatch" } as const;
+      }
+
+      this.db
+        .prepare(
+          "UPDATE device_code SET device_id = ?, paired_at = COALESCE(paired_at, ?) WHERE code = ?",
+        )
+        .run(target, now, normalized);
+      this.db
+        .prepare(
+          `UPDATE device
+           SET pair_status = 'paired', ip_address = COALESCE(?, ip_address), updated_at = ?
+           WHERE device_id = ?`,
+        )
+        .run(ipAddress, now, target);
+
+      return { ok: true, device_id: target, device_code: normalized } as const;
+    });
+  }
+}
+
+function normalizeDeviceCode(code: string): string {
+  const normalized = code.trim().toUpperCase();
+  if (normalized.length === 0) throw new ValidationError("设备码不能为空");
+  return normalized;
+}
+
+function toDeviceCode(row: DeviceCodeRow): DeviceCodeRecord {
+  return {
+    code: row.code,
+    device_id: row.device_id,
+    pair_status: row.pair_status,
+    created_at: row.created_at,
+    paired_at: row.paired_at,
+  };
 }

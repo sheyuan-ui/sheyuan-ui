@@ -41,6 +41,7 @@ const app = createHelmetServer({
   deviceToken: process.env.HELMET_HUB_DEVICE_TOKEN,
   heartbeatIntervalMs: intEnv("HELMET_HUB_HEARTBEAT_INTERVAL_MS"),
   offlineTimeoutMs: intEnv("HELMET_HUB_OFFLINE_TIMEOUT_MS"),
+  commandSweepIntervalMs: intEnv("HELMET_HUB_COMMAND_SWEEP_INTERVAL_MS"),
   logger: (message) => console.error(message),
 });
 const address = await app.listen(port, host);

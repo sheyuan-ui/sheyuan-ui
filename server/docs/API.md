@@ -17,6 +17,7 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | `HOST` | `0.0.0.0` | 监听地址；现场局域网需要外部设备访问 |
 | `HELMET_HUB_DB` | `data/helmet-hub.db` | SQLite 文件；启动时自动迁移 |
 | `HELMET_HUB_UPLOAD_DIR` | `data/uploads` | 分块落盘目录，首个分块写入时创建 |
+| `HELMET_HUB_COMMAND_SWEEP_INTERVAL_MS` | `1000` | 指令超时判定轮询间隔（毫秒） |
 | `HELMET_HUB_TOKEN` | 未设置 | 设置后 `/api` 与 `/ws` 必须携带令牌 |
 
 设置令牌后，HTTP 使用 `Authorization: Bearer <token>`，WebSocket 使用 `?token=<token>`。
@@ -74,6 +75,7 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | POST | `/api/events/{id}/review` | 人工复核，只改 `review_*` 并留痕 |
 | POST | `/api/commands` | 下发指令，201；版本不一致 409 |
 | GET | `/api/commands/{id}` | 指令详情与执行结果 |
+| POST | `/api/commands/{id}/result` | 设备回报执行结果（`completed` / `rejected` / `failed`）；设备令牌鉴权；重复回执幂等，终态冲突 409 |
 | POST | `/api/uploads` | 登记上传元数据，201 |
 | GET | `/api/uploads/{id}` | 上传进度与状态 |
 | POST | `/api/uploads/{id}/chunks?chunk_index=` | 上传一个分块（二进制） |
@@ -88,7 +90,8 @@ npm run serve   # 默认 http://0.0.0.0:8080
 
 ## 4. 写接口幂等
 
-除 GET 外所有接口（含分块与完成）必须携带 `Idempotency-Key`，否则 400 `INVALID_ARGUMENT`。
+除 GET 外所有**人账号**写接口（含分块与完成）必须携带 `Idempotency-Key`，否则 400 `INVALID_ARGUMENT`。
+设备侧接口（注册、心跳、指令回执）不要求该头，按 `device_id` 覆盖或 `command_id` 终态天然幂等。
 
 - 同键 + 同请求 → 重放首次成功响应（状态码与 `data` 一致）；
 - 同键 + 不同请求 → 409 `CONFLICT`；
@@ -101,12 +104,35 @@ npm run serve   # 默认 http://0.0.0.0:8080
 分块请求的指纹由 `文件 ID + chunk_index + Content-Length` 组成；
 同一分块重传且长度一致时直接返回当前进度，不重复落盘。
 
+### 4.1 指令回执（设备侧）
+
+`POST /api/commands/{id}/result`，需 `X-Device-Token`（配置了设备令牌时）：
+
+```json
+{
+  "device_id": "edge-01",
+  "state": "completed",
+  "code": null,
+  "message": null,
+  "finished_at": "2026-11-27T10:00:00Z"
+}
+```
+
+- `state` 只接受 `completed` / `rejected` / `failed`；`accepted` 由下发产生，`timeout` 只由服务端 sweeper 产生。
+- `device_id` 可省略；提供时必须等于指令归属设备，否则 400。
+- 重复同结果返回 200 与当前指令（幂等）；已进终态后再报不同结果返回 409，
+  `details` 含 `current_state` 与 `requested_state`。
+- 成功写入后推送 `command.result`；超过 `expires_at` 仍为 `accepted` 的指令由 sweeper 改判 `timeout` 并推送同一主题。
+
 ## 5. 关键校验
 
 | 场景 | 行为 |
 | --- | --- |
 | 指令 `expected_state_version` 与设备最新版本不一致 | 409，`details` 给出期望值与当前值 |
 | 设备存在但从未上报状态 | 409，不能凭猜测的版本下发指令 |
+| 指令回执 `state` 为 `accepted` / `timeout` | 400 |
+| 指令回执 `device_id` 与指令归属不一致 | 400 |
+| 指令已终态，又回报不同结果 | 409，`details.current_state` |
 | 配对码不存在 | 400 `INVALID_ARGUMENT` |
 | 配对码过期 | 400 `INVALID_ARGUMENT` |
 | 配对码已使用 | 409 `CONFLICT` |
@@ -152,9 +178,25 @@ npm run serve   # 默认 http://0.0.0.0:8080
 }
 ```
 
-当前已推送：`upload.progress`（每个分块落盘、完成校验时）。
-`device.status` / `device.events` / `command.result` 需要在设备接入链路（WEB-03/06）就位后，
-在对应写入点调用 `hub.publish()`；订阅与鉴权已就绪。
+当前已推送：`upload.progress`（分块落盘、完成校验）、`device.status`（注册、心跳、离线判定）、
+`command.result`（设备回执、超时改判）。`device.events` 待会话/事件写入接口就位后在写入点调用 `hub.publish()`。
+
+`command.result` 载荷：
+
+```json
+{
+  "command_id": "cmd-20261127-0001",
+  "device_id": "edge-01",
+  "session_id": "sess-20261118-0007",
+  "action": "start_job",
+  "result": {
+    "state": "completed",
+    "code": null,
+    "message": null,
+    "finished_at": "2026-11-27T10:00:00.000Z"
+  }
+}
+```
 
 ## 8. 实现位置
 
@@ -166,11 +208,12 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | `src/server/idempotency.ts` | 幂等校验与重放 |
 | `src/server/validate.ts` / `query.ts` | 请求体与查询参数校验 |
 | `src/server/hub.ts` | WebSocket 主题订阅与推送 |
+| `src/server/command-events.ts` | 指令回执/超时的 `command.result` 推送载荷 |
 | `src/server/handlers/*.ts` | 六对象与上传接口 |
 | `src/cli/serve.ts` | 启动入口（自动迁移、优雅关闭） |
 
 集成测试见 `tests/api.test.ts`：响应外壳、幂等重放/冲突、乐观锁、配对、复核留痕、
-分块上传 + SHA-256、WebSocket 推送、令牌保护。
+分块上传 + SHA-256、指令回执与超时、WebSocket 推送、令牌保护。
 
 ## 9. 认证与授权（T04）
 
@@ -183,6 +226,7 @@ npm run serve   # 默认 http://0.0.0.0:8080
 | 请求 | 要求 |
 | --- | --- |
 | `POST /api/auth/login`、`POST /api/auth/refresh` | 公开 |
+| `POST /api/devices/register`、`POST /api/devices/{id}/heartbeat`、`POST /api/commands/{id}/result` | 设备令牌 `X-Device-Token` |
 | `GET /api/audit` | `admin` |
 | 其余 `GET /api/*` | `viewer` |
 | 其余写方法（`POST/PUT/PATCH/DELETE /api/*`） | `operator` |

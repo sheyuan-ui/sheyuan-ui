@@ -4,6 +4,7 @@ import { after, before, describe, test } from "node:test";
 import { WebSocket, type RawData } from "ws";
 import { migrate, openDatabase } from "../src/db/index.ts";
 import type { Db } from "../src/db/open.ts";
+import { createRepositories } from "../src/repos/index.ts";
 import { createHelmetServer, type HelmetServer } from "../src/server/index.ts";
 
 const migrationsDir = join(import.meta.dirname, "../src/db/migrations");
@@ -315,6 +316,39 @@ describe("设备令牌鉴权", () => {
     );
     assert.equal(ok.status, 200);
     assert.equal(ok.data?.accepted, true);
+  });
+
+  test("指令回执同样校验设备令牌", async () => {
+    await postJson(ctx.baseUrl, "/api/devices/register", register, {
+      "x-device-token": "dev-secret",
+    });
+    const now = Date.now();
+    createRepositories(ctx.db).commands.create({
+      command_id: "cmd-token-001",
+      device_id: "edge-token",
+      session_id: null,
+      expected_state_version: 0,
+      action: "snapshot",
+      issued_at: new Date(now).toISOString(),
+      expires_at: new Date(now + 60_000).toISOString(),
+      result: { state: "accepted", code: null, message: null, finished_at: null },
+    });
+
+    const denied = await postJson(ctx.baseUrl, "/api/commands/cmd-token-001/result", {
+      device_id: "edge-token",
+      state: "completed",
+    });
+    assert.equal(denied.status, 401);
+    assert.equal(denied.body.code, "UNAUTHORIZED");
+
+    const ok = await postJson(
+      ctx.baseUrl,
+      "/api/commands/cmd-token-001/result",
+      { device_id: "edge-token", state: "completed" },
+      { "x-device-token": "dev-secret" },
+    );
+    assert.equal(ok.status, 200);
+    assert.equal((ok.data?.result as { state: string }).state, "completed");
   });
 
   test("人账号接口仍按角色矩阵拦截：无令牌 GET 设备列表 401", async () => {

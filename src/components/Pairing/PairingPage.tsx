@@ -4,6 +4,11 @@ import { HUD } from "../../theme/theme";
 import { useNotification } from "../../contexts/NotificationContext";
 import type { DeviceOption } from "../TaskInfo/NewTaskForm";
 import type { DeviceCodeEntry } from "../../deviceCodes";
+import { API } from "../../contracts/api";
+import { API_BASE, USE_MOCK, request } from "../../api/client";
+import { isApiRequestError } from "../../api/errors";
+import { useDevicesFeed } from "../../api/useDevices";
+import AsyncState from "../AsyncState/AsyncState";
 
 const MONO = '"Roboto Mono", "Consolas", monospace';
 
@@ -217,14 +222,17 @@ const DeviceRow = styled("div")<{ $off?: boolean }>(({ $off }) => ({
   opacity: $off ? 0.6 : 1,
 }));
 
-const Dot = styled("span")<{ $on: boolean }>(({ $on }) => ({
-  width: 6,
-  height: 6,
-  flexShrink: 0,
-  borderRadius: "50%",
-  backgroundColor: $on ? HUD.ok : HUD.textDim,
-  boxShadow: $on ? `0 0 6px ${HUD.ok}` : "none",
-}));
+const Dot = styled("span")<{ $on: boolean; $tone?: string }>(({ $on, $tone }) => {
+  const color = $tone ?? ($on ? HUD.ok : HUD.textDim);
+  return {
+    width: 6,
+    height: 6,
+    flexShrink: 0,
+    borderRadius: "50%",
+    backgroundColor: color,
+    boxShadow: $tone || $on ? `0 0 6px ${color}` : "none",
+  };
+});
 
 const RowName = styled("span")({
   display: "flex",
@@ -402,11 +410,11 @@ const MetaLine = styled("div")({
 });
 
 interface PairingPageProps {
-  /** 全局设备注册表；已配对即视为已连接 */
+  /** 全局设备注册表；配对成功即标记为已配对 */
   devices: DeviceOption[];
   /** 管理员在设置页维护的设备码库，配对只认库内设备码 */
   codes: DeviceCodeEntry[];
-  /** 连接成功：把设备标记为已配对，状态由全局维护 */
+  /** 配对成功：把设备标记为已配对，状态由全局维护 */
   onPaired: (id: string) => void;
   /** 取消配对：设备回到可重新配对状态 */
   onUnpaired: (id: string) => void;
@@ -415,26 +423,53 @@ interface PairingPageProps {
 }
 
 export default function PairingPage({
-  devices,
+  devices: registeredDevices,
   codes,
   onPaired,
   onUnpaired,
   onCreateTask,
 }: PairingPageProps) {
   const { notify } = useNotification();
+  /** 真实模式以服务端设备列表为准；演示模式沿用全局注册表 */
+  const feed = useDevicesFeed(!USE_MOCK);
+  const devices = useMemo<DeviceOption[]>(() => {
+    if (USE_MOCK) return registeredDevices;
+    return (feed.devices ?? []).map((item) => ({
+      id: item.device_id,
+      alias: item.alias ?? undefined,
+      online: item.runtime.state !== "offline",
+      paired: item.pair_status === "paired",
+      state: item.runtime.state,
+    }));
+  }, [registeredDevices, feed.devices]);
+  const summaryById = useMemo(
+    () => new Map((feed.devices ?? []).map((item) => [item.device_id, item])),
+    [feed.devices],
+  );
+  const serviceHost = API_BASE.length > 0 ? API_BASE : window.location.origin;
   /** 扫描识别状态：目标设备、最近一次识别结果、无可用设备 */
   const [scanning, setScanning] = useState(false);
   const [scanTarget, setScanTarget] = useState<string | null>(null);
   const [scanDone, setScanDone] = useState<{ id: string; code: string } | null>(null);
-  const [scanEmpty, setScanEmpty] = useState(false);
+  const [scanNotice, setScanNotice] = useState<string | null>(null);
   const scanTimer = useRef<number | null>(null);
-  const connectedIds = useMemo(
+  const pairedIds = useMemo(
     () => devices.filter((d) => d.paired).map((d) => d.id),
     [devices],
   );
-  /** 库内设备码；未登记的设备显示「未登记」且无法配对 */
+  const metaFor = (id: string) => {
+    if (USE_MOCK) return metaOf(id);
+    const status = summaryById.get(id)?.status;
+    return {
+      model: status?.model ?? "--",
+      firmware: status?.firmware_version ?? "--",
+    };
+  };
+  /** 演示模式显示设备码库里的码；真实模式显示管理服务为该设备登记的码 */
   const codeFor = (id: string) =>
-    codes.find((c) => c.id === id)?.code ?? "未登记";
+    USE_MOCK
+      ? (codes.find((c) => c.id === id)?.code ?? "未登记")
+      : (summaryById.get(id)?.device_code ?? "未登记");
   /** 现场网络：现场 Wi-Fi 与管理服务通信，头盔热点用于识别设备 */
   const [networkIndex, setNetworkIndex] = useState(0);
   const network = NETWORKS[networkIndex];
@@ -452,22 +487,61 @@ export default function PairingPage({
     [],
   );
 
+  /** 真实配对：读回设备码，命中设备码库才提交配对 */
+  const connectReal = async (deviceId: string) => {
+    setScanning(true);
+    setScanTarget(deviceId);
+    try {
+      const code = summaryById.get(deviceId)?.device_code ?? null;
+      if (code === null) {
+        setScanNotice("识别到的设备码不在库中，请先在「设置」登记后再扫描");
+        notify("识别到的设备码不在库中，请先在「设置」登记", "error");
+        return;
+      }
+      await request(API.pair, { json: { device_code: code, device_id: deviceId } });
+      onPaired(deviceId);
+      setScanDone({ id: deviceId, code });
+      setScanNotice(null);
+      notify(`${deviceId} 设备码校验通过，已配对`, "success");
+      void feed.reload();
+    } catch (error) {
+      const message = isApiRequestError(error) ? error.message : "请稍后重试";
+      setScanNotice(`配对失败：${message}`);
+      notify(`配对失败：${message}`, "error");
+    } finally {
+      setScanning(false);
+      setScanTarget(null);
+    }
+  };
+
   /** PAD 识别设备热点 → 读取设备返回的设备码 → 在设备码库中校验通过后连接 */
   const scanAndConnect = () => {
     if (scanning) return;
     const candidates = devices.filter((d) => d.online && !d.paired);
+    setScanDone(null);
+    setScanNotice(null);
+
+    if (!USE_MOCK) {
+      const target =
+        candidates.find((d) => summaryById.get(d.id)?.device_code != null) ?? candidates[0];
+      if (!target) {
+        setScanNotice("未发现待配对的设备热点，请确认设备已上电且未配对");
+        notify("未发现待配对的设备（需在线且未配对）", "error");
+        return;
+      }
+      void connectReal(target.id);
+      return;
+    }
+
     const target = candidates.find((d) => codes.some((c) => c.id === d.id));
     const code = target ? (codes.find((c) => c.id === target.id)?.code ?? null) : null;
-    setScanDone(null);
-    setScanEmpty(false);
     if (!target || !code) {
-      setScanEmpty(true);
-      notify(
+      const message =
         candidates.length > 0
           ? "识别到的设备码均不在库中，请先在「设置」登记"
-          : "未发现待连接的设备热点",
-        "error",
-      );
+          : "未发现待配对的设备热点，请确认设备已上电";
+      setScanNotice(message);
+      notify(message, "error");
       return;
     }
     setScanning(true);
@@ -477,7 +551,7 @@ export default function PairingPage({
       setScanning(false);
       setScanTarget(null);
       setScanDone({ id: target.id, code });
-      notify(`${target.id} 设备码校验通过，已连接`, "success");
+      notify(`${target.id} 设备码校验通过，已配对`, "success");
     }, 900);
   };
 
@@ -492,9 +566,11 @@ export default function PairingPage({
       <Shell>
         <PageHead>
           <div>
-            <h1>设备连接与配对</h1>
+            <h1>设备配对</h1>
             <p>
-              PAD 识别设备热点并读回设备码，与设备码库比对通过后建立连接；新设备请先由管理员在「设置」登记。
+              {USE_MOCK
+                ? "PAD 识别设备热点并读回设备码，与设备码库比对通过后完成配对；新设备请先由管理员在「设置」登记。"
+                : "PAD 识别设备热点并读回设备码，设备码在管理服务的设备码库中才会配对；新设备请先由管理员在「设置」登记。"}
             </p>
           </div>
         </PageHead>
@@ -510,15 +586,34 @@ export default function PairingPage({
               disabled={scanning}
               style={{ height: 28, padding: "0 12px", marginLeft: 10 }}
             >
-              {scanning ? "识别中…" : "扫描热点并连接"}
+              {scanning ? "识别中…" : "扫描热点并配对"}
             </Btn>
           </PanelHead>
+          <AsyncState
+            loading={!USE_MOCK && feed.loading}
+            error={USE_MOCK ? null : feed.error}
+            onRetry={USE_MOCK ? undefined : () => void feed.reload()}
+            empty={!USE_MOCK && !feed.loading && devices.length === 0}
+            emptyText="暂无设备 · 等待设备上报"
+            loadingText="正在读取设备列表"
+          >
           {devices.map((device) => {
             const connected = device.paired;
             const checking = scanning && scanTarget === device.id;
             return (
               <DeviceRow key={device.id} $off={!device.online}>
-                <Dot $on={device.online} />
+                <Dot
+                  $on={device.online && device.paired && device.state !== "fault"}
+                  $tone={
+                    !device.online
+                      ? undefined
+                      : device.state === "fault"
+                        ? HUD.danger
+                        : !device.paired
+                          ? HUD.gold
+                          : undefined
+                  }
+                />
                 <RowName>
                   <b>{device.id}</b>
                   <RowCode>{codeFor(device.id)}</RowCode>
@@ -526,20 +621,35 @@ export default function PairingPage({
                 <RowActions>
                   {connected ? (
                     <>
-                      <ConnectedTag>已连接</ConnectedTag>
-                      <UnpairBtn type="button" onClick={() => unpair(device.id)}>
-                        取消配对
-                      </UnpairBtn>
+                      <ConnectedTag>已配对</ConnectedTag>
+                      {!device.online ? (
+                        <StateTag>离线</StateTag>
+                      ) : device.state === "fault" ? (
+                        <StateTag>故障</StateTag>
+                      ) : null}
+                      {USE_MOCK && (
+                        <UnpairBtn type="button" onClick={() => unpair(device.id)}>
+                          取消配对
+                        </UnpairBtn>
+                      )}
                     </>
                   ) : checking ? (
                     <StateTag>校验设备码…</StateTag>
                   ) : (
-                    <StateTag>{device.online ? "待识别" : "离线"}</StateTag>
+                    <>
+                      <StateTag>未配对</StateTag>
+                      {!device.online ? (
+                        <StateTag>离线</StateTag>
+                      ) : device.state === "fault" ? (
+                        <StateTag>故障</StateTag>
+                      ) : null}
+                    </>
                   )}
                 </RowActions>
               </DeviceRow>
             );
           })}
+          </AsyncState>
         </Panel>
 
         <Grid>
@@ -572,51 +682,56 @@ export default function PairingPage({
 
               <AddrRow>
                 <span>服务地址</span>
-                <b>http://192.168.31.20:8080</b>
+                <b>{serviceHost}</b>
               </AddrRow>
               <MetaLine>
-                设备码库 {codes.length} 条 · 已连接 {connectedIds.length} 台
+                {USE_MOCK
+                  ? `设备码库 ${codes.length} 条 · 已配对 ${pairedIds.length} 台`
+                  : `设备码命中设备码库才配对 · 已配对 ${pairedIds.length} 台`}
               </MetaLine>
             </PanelBody>
           </Panel>
 
           <Panel>
-            <PanelHead>连接结果</PanelHead>
+            <PanelHead>配对结果</PanelHead>
             <ResultBody>
               {scanning && <ConnectingLine>正在识别热点并校验设备码…</ConnectingLine>}
-              {scanEmpty && !scanning && (
+              {scanNotice && !scanning && (
                 <NoticeBox $tone="danger">
-                  <b>未发现设备</b>
-                  请确认设备已上电并开启热点；未登记的设备请先由管理员在「设置」登记设备码。
+                  <b>配对未通过</b>
+                  {scanNotice}
                 </NoticeBox>
               )}
               {scanDone && !scanning && (
                 <NoticeBox $tone="ok">
                   <b>配对成功</b>
-                  {scanDone.id} 返回设备码 {scanDone.code}，已在设备码库中匹配并建立连接。
+                  {scanDone.id} 返回设备码 {scanDone.code}，
+                  {USE_MOCK
+                    ? "已在设备码库中匹配并完成配对。"
+                    : "已在管理服务的设备码库中匹配并完成配对。"}
                 </NoticeBox>
               )}
-              {connectedIds.length === 0 && !scanning && (
+              {pairedIds.length === 0 && !scanning && (
                 <ResultPlaceholder>
-                  尚未建立连接
+                  尚无已配对设备
                   <br />
-                  识别到已登记的设备热点后自动连接
+                  识别到已登记的设备热点后自动配对
                 </ResultPlaceholder>
               )}
-              {connectedIds.length > 0 && (
+              {pairedIds.length > 0 && (
                 <>
                   <ResultHead>
-                    已连接 <b>{connectedIds.length}</b> 台
+                    已配对 <b>{pairedIds.length}</b> 台
                   </ResultHead>
                   <ResultList>
-                    {connectedIds.map((id) => (
+                    {pairedIds.map((id) => (
                       <ResultRow key={id}>
                         <b>{id}</b>
                         <ResultMeta>
-                          {metaOf(id).model} · {metaOf(id).firmware}
+                          {metaFor(id).model} · {metaFor(id).firmware}
                         </ResultMeta>
                         <ResultMeta>{codeFor(id)}</ResultMeta>
-                        <ResultTag>已连接</ResultTag>
+                        <ResultTag>已配对</ResultTag>
                       </ResultRow>
                     ))}
                   </ResultList>
@@ -629,7 +744,9 @@ export default function PairingPage({
               )}
 
               <HintList>
-                设备码不在库中不建立连接，请先由管理员在「设置」登记设备码 · 热点断开自动重连 · 服务不可达 502
+                {USE_MOCK
+                  ? "设备码不在库中不进行配对，请先由管理员在「设置」登记设备码 · 热点断开自动重连 · 服务不可达 502"
+                  : "设备码不在管理服务的设备码库中不进行配对，请先在「设置」登记 · 热点断开自动重连 · 服务不可达 502"}
               </HintList>
             </ResultBody>
           </Panel>

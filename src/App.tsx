@@ -12,6 +12,8 @@ import SettingsPage from "./components/Settings/SettingsPage";
 import type { DeviceOption } from "./components/TaskInfo/NewTaskForm";
 import LoginPage from "./components/Login/LoginPage";
 import { authApi, type AuthUser, type Role } from "./api";
+import { USE_MOCK } from "./api/client";
+import { useDevicesFeed } from "./api/useDevices";
 import { NotificationProvider } from "./contexts/NotificationContext";
 import { PlaybackProvider } from "./contexts/PlaybackContext";
 import { loadCodes, saveCodes, type DeviceCodeEntry } from "./deviceCodes";
@@ -105,7 +107,7 @@ const EmptyHint = styled("span")({
 
 type Page = "main" | "config" | "pair" | "task" | "settings";
 
-/** 全局设备注册表：任务页与配对页共用，配对成功即标记为已连接 */
+/** 演示设备注册表：任务页与配对页共用，配对成功即标记为已配对 */
 const INITIAL_DEVICES: DeviceOption[] = [
   { id: "头盔-01", alias: "1号抓鸡位", online: true, paired: true },
   { id: "头盔-02", alias: "2号抓鸡位", online: true, paired: true },
@@ -113,7 +115,7 @@ const INITIAL_DEVICES: DeviceOption[] = [
   { id: "头盔-04", alias: "4号抓鸡位", online: true, paired: false },
 ];
 
-/** 已连接设备属于业务状态，刷新后仍需保留 */
+/** 演示模式的配对状态属于业务状态，刷新后仍需保留 */
 const PAIRED_KEY = "sheyuan.paired-devices";
 
 const loadPairedIds = (): string[] | null => {
@@ -156,14 +158,31 @@ function AppContent({ role, onLogout }: AppContentProps) {
   const [page, setPage] = useState<Page>("main");
   /** 双击放大的那一路画面；放大后左右目与 手部图各占一半 */
   const [expandedEye, setExpandedEye] = useState<CameraEye | null>(null);
-  /** 注册设备与配对状态；配对页连接成功后写回这里，切页不丢 */
+  /** 演示模式的本地设备注册表；真实模式以服务端设备列表为准 */
   const [devices, setDevices] = useState<DeviceOption[]>(loadDevices);
   /** 设备码库由管理员在设置页维护，配对页只认库内设备码 */
   const [codes, setCodes] = useState<DeviceCodeEntry[]>(loadCodes);
-  /** 在线且已配对的设备 */
+  /** 全局设备视图：配对状态 + 运行状态，顶栏与各页面共用同一份 */
+  const feed = useDevicesFeed(!USE_MOCK);
+  const allDevices = useMemo<DeviceOption[]>(() => {
+    if (USE_MOCK) {
+      return devices.map((d): DeviceOption => ({
+        ...d,
+        state: d.online ? "online" : "offline",
+      }));
+    }
+    return (feed.devices ?? []).map((item) => ({
+      id: item.device_id,
+      alias: item.alias ?? undefined,
+      online: item.runtime.state !== "offline",
+      paired: item.pair_status === "paired",
+      state: item.runtime.state,
+    }));
+  }, [devices, feed.devices]);
+  /** 可预览设备：已配对、在线且非故障 */
   const connectedDevices = useMemo(
-    () => devices.filter((d) => d.online && d.paired),
-    [devices],
+    () => allDevices.filter((d) => d.paired && d.online && d.state !== "fault"),
+    [allDevices],
   );
 
   useEffect(() => {
@@ -171,6 +190,7 @@ function AppContent({ role, onLogout }: AppContentProps) {
   }, [codes]);
 
   useEffect(() => {
+    if (!USE_MOCK) return;
     const ids = devices.filter((d) => d.paired).map((d) => d.id);
     try {
       window.localStorage.setItem(PAIRED_KEY, JSON.stringify(ids));
@@ -186,6 +206,13 @@ function AppContent({ role, onLogout }: AppContentProps) {
     selectedDeviceId && connectedDevices.some((d) => d.id === selectedDeviceId)
       ? selectedDeviceId
       : (connectedDevices[0]?.id ?? null);
+  /** 首页无画面时的原因提示：未接入 / 未配对 / 已配对但不可用 */
+  const emptyHint =
+    allDevices.length === 0
+      ? "未接入设备"
+      : allDevices.some((d) => d.paired)
+        ? "已配对设备当前不可用"
+        : "已接入设备未配对";
 
   /** 只读角色不允许停留在设备配对页，非管理员不允许停留在设置页 */
   useEffect(() => {
@@ -201,15 +228,25 @@ function AppContent({ role, onLogout }: AppContentProps) {
     setPage("main");
   };
 
-  const handlePaired = (id: string) =>
+  const handlePaired = (id: string) => {
+    if (!USE_MOCK) {
+      void feed.reload();
+      return;
+    }
     setDevices((prev) =>
       prev.map((d) => (d.id === id ? { ...d, paired: true } : d)),
     );
+  };
 
-  const handleUnpaired = (id: string) =>
+  const handleUnpaired = (id: string) => {
+    if (!USE_MOCK) {
+      void feed.reload();
+      return;
+    }
     setDevices((prev) =>
       prev.map((d) => (d.id === id ? { ...d, paired: false } : d)),
     );
+  };
 
   /** 管理员登记设备码：分配新设备号并加入注册表，等待现场配对 */
   const handleAddCode = (
@@ -248,7 +285,7 @@ function AppContent({ role, onLogout }: AppContentProps) {
         onLogout={onLogout}
         page={page}
         onNavigate={setPage}
-        devices={connectedDevices}
+        devices={allDevices}
         activeDeviceId={activeDeviceId}
         onSelectDevice={handleSelectDevice}
       />
@@ -274,12 +311,12 @@ function AppContent({ role, onLogout }: AppContentProps) {
                 <EmptyPane>
                   <EmptyTag>左目</EmptyTag>
                   <EmptyTitle>无画面</EmptyTitle>
-                  <EmptyHint>未接入设备</EmptyHint>
+                  <EmptyHint>{emptyHint}</EmptyHint>
                 </EmptyPane>
                 <EmptyPane>
                   <EmptyTag>右目</EmptyTag>
                   <EmptyTitle>无画面</EmptyTitle>
-                  <EmptyHint>未接入设备</EmptyHint>
+                  <EmptyHint>{emptyHint}</EmptyHint>
                 </EmptyPane>
               </EmptyEyes>
             </VideoColumn>
@@ -287,7 +324,11 @@ function AppContent({ role, onLogout }: AppContentProps) {
               <EmptyPane>
                 <EmptyTag>手部图</EmptyTag>
                 <EmptyTitle>无画面</EmptyTitle>
-                <EmptyHint>未接入设备 · 请先在「设备配对」接入</EmptyHint>
+                <EmptyHint>
+                  {allDevices.length === 0
+                    ? "未接入设备 · 请先在「设备配对」接入"
+                    : "请检查设备在线状态与配对结果"}
+                </EmptyHint>
               </EmptyPane>
             </ViewerColumn>
           </MediaRow>
@@ -296,7 +337,7 @@ function AppContent({ role, onLogout }: AppContentProps) {
         <DevicePage />
       ) : page === "pair" && role !== "viewer" ? (
         <PairingPage
-          devices={devices}
+          devices={allDevices}
           codes={codes}
           onPaired={handlePaired}
           onUnpaired={handleUnpaired}
@@ -308,7 +349,7 @@ function AppContent({ role, onLogout }: AppContentProps) {
       ) : page === "settings" && role === "admin" ? (
         <SettingsPage
           codes={codes}
-          devices={devices}
+          devices={allDevices}
           onAddCode={handleAddCode}
           onRemoveCode={handleRemoveCode}
         />
@@ -317,7 +358,7 @@ function AppContent({ role, onLogout }: AppContentProps) {
       <TaskInfoPage
         hidden={page !== "task"}
         role={role}
-        devices={devices}
+        devices={allDevices}
         newTaskSignal={newTaskSignal}
       />
     </AppContainer>
